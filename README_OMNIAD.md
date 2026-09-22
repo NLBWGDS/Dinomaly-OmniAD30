@@ -3,7 +3,7 @@
 This repository originally targets public IAD benchmarks such as MVTec AD, VisA, Real-IAD, and MPDD. For JBGS-2026-08, use the Omni-AD entry point added in this fork:
 
 ```bash
-python dinomaly_omniad_uni.py --mode train --data_path ../Omni-AD-30-release
+python dinomaly_omniad_uni.py --mode train --data_path ../dataset/Omni-AD-30-release
 ```
 
 ## Compliance Boundary
@@ -16,12 +16,18 @@ python dinomaly_omniad_uni.py --mode train --data_path ../Omni-AD-30-release
 
 ## Commands
 
+Check that the local dataset and imports are ready without loading the backbone:
+
+```bash
+python dinomaly_omniad_uni.py --mode check
+```
+
 Train a single multi-category model:
 
 ```bash
 python dinomaly_omniad_uni.py ^
   --mode train ^
-  --data_path ../Omni-AD-30-release ^
+  --data_path ../dataset/Omni-AD-30-release ^
   --output_dir ./saved_results/omniad_dinomaly_uni
 ```
 
@@ -30,7 +36,7 @@ Disable development-set evaluation during training:
 ```bash
 python dinomaly_omniad_uni.py ^
   --mode train ^
-  --data_path ../Omni-AD-30-release ^
+  --data_path ../dataset/Omni-AD-30-release ^
   --eval_every 0
 ```
 
@@ -39,7 +45,7 @@ Evaluate a saved checkpoint on the labeled development test split:
 ```bash
 python dinomaly_omniad_uni.py ^
   --mode eval ^
-  --data_path ../Omni-AD-30-release ^
+  --data_path ../dataset/Omni-AD-30-release ^
   --checkpoint ./saved_results/omniad_dinomaly_uni/omniad_dinomaly_uni.pth
 ```
 
@@ -48,7 +54,7 @@ Run pure-forward prediction and export anomaly scores plus `.npy` heatmaps:
 ```bash
 python dinomaly_omniad_uni.py ^
   --mode predict ^
-  --data_path ../Omni-AD-30-release ^
+  --data_path ../dataset/Omni-AD-30-release ^
   --checkpoint ./saved_results/omniad_dinomaly_uni/omniad_dinomaly_uni.pth ^
   --output_dir ./predictions/omniad_dinomaly_uni
 ```
@@ -58,7 +64,7 @@ Limit to a subset of categories while debugging:
 ```bash
 python dinomaly_omniad_uni.py ^
   --mode train ^
-  --data_path ../Omni-AD-30-release ^
+  --data_path ../dataset/Omni-AD-30-release ^
   --categories air_conditioner_filter,battery_piece ^
   --total_iters 100
 ```

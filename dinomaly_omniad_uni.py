@@ -14,6 +14,10 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from torchvision.datasets import ImageFolder
 
 
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DATA_PATH = os.path.abspath(os.path.join(REPO_DIR, "..", "dataset", "Omni-AD-30-release"))
+
+
 def setup_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -43,6 +47,10 @@ def get_logger(name, save_path=None, level="INFO"):
 
 
 def discover_categories(data_path, categories=None):
+    data_path = os.path.abspath(data_path)
+    if not os.path.isdir(data_path):
+        raise FileNotFoundError(f"Omni-AD data path does not exist: {data_path}")
+
     if categories:
         selected = [item.strip() for item in categories.split(",") if item.strip()]
     else:
@@ -58,6 +66,41 @@ def discover_categories(data_path, categories=None):
             raise FileNotFoundError(f"{item} is missing train/good: {train_good}")
         valid.append(item)
     return valid
+
+
+def check_environment(args, item_list, logger):
+    logger.info(f"data_path: {os.path.abspath(args.data_path)}")
+    logger.info(f"categories: {len(item_list)}")
+
+    total_train = 0
+    missing_test = []
+    missing_gt = []
+    for item in item_list:
+        train_good = os.path.join(args.data_path, item, "train", "good")
+        train_count = len([
+            name for name in os.listdir(train_good)
+            if os.path.splitext(name)[1].lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+        ])
+        total_train += train_count
+        if not os.path.isdir(os.path.join(args.data_path, item, "test")):
+            missing_test.append(item)
+        if not os.path.isdir(os.path.join(args.data_path, item, "ground_truth")):
+            missing_gt.append(item)
+        if train_count == 0:
+            raise RuntimeError(f"{item} has no images under train/good")
+
+    logger.info(f"train/good images: {total_train}")
+    logger.info(f"missing test dirs: {len(missing_test)}")
+    logger.info(f"missing ground_truth dirs: {len(missing_gt)}")
+    logger.info(f"python: {'.'.join(map(str, os.sys.version_info[:3]))}")
+    logger.info(f"torch: {torch.__version__}, cuda_available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        logger.info(f"cuda device: {torch.cuda.get_device_name(0)}")
+
+    from dataset import get_data_transforms
+
+    get_data_transforms(args.image_size, args.crop_size)
+    logger.info("check passed: dataset layout and core imports are ready.")
 
 
 def has_dev_labels(data_path, item):
@@ -359,8 +402,8 @@ def predict(args, item_list, device, logger):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Dinomaly reproduction entry for Omni-AD style data.")
-    parser.add_argument("--mode", choices=["train", "eval", "predict"], default="train")
-    parser.add_argument("--data_path", type=str, default="../Omni-AD-30-release")
+    parser.add_argument("--mode", choices=["check", "train", "eval", "predict"], default="train")
+    parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATH)
     parser.add_argument("--categories", type=str, default=None, help="Comma-separated category list. Default: auto-discover.")
     parser.add_argument("--output_dir", type=str, default="./saved_results/omniad_dinomaly_uni")
     parser.add_argument("--checkpoint", type=str, default=None)
@@ -391,14 +434,16 @@ if __name__ == "__main__":
     from dataset import get_data_transforms
 
     args = parse_args()
-    logger = get_logger("omniad_dinomaly_uni", args.output_dir)
+    logger = get_logger("omniad_dinomaly_uni", None if args.mode == "check" else args.output_dir)
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     logger.info(f"device: {device}")
 
     item_list = discover_categories(args.data_path, args.categories)
     data_transform, gt_transform = get_data_transforms(args.image_size, args.crop_size)
 
-    if args.mode == "train":
+    if args.mode == "check":
+        check_environment(args, item_list, logger)
+    elif args.mode == "train":
         train(args, item_list, device, logger)
     elif args.mode == "eval":
         if args.checkpoint is None:
