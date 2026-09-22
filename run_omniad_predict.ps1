@@ -1,9 +1,9 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Checkpoint,
-    [string]$DataPath = "..\dataset\Omni-AD-30-release",
+    [string]$DataPath = "..\dataset\download\Omni-AD-30-release",
     [string]$OutputDir = ".\predictions\omniad_dinomaly_uni",
-    [int]$BatchSize = 16,
+    [int]$BatchSize = 4,
     [int]$NumWorkers = 4
 )
 

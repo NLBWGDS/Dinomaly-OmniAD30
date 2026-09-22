@@ -1,5 +1,5 @@
 param(
-    [string]$DataPath = "..\dataset\Omni-AD-30-release"
+    [string]$DataPath = "..\dataset\download\Omni-AD-30-release"
 )
 
 python .\dinomaly_omniad_uni.py `

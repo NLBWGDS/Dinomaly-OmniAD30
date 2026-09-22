@@ -3,7 +3,7 @@
 This repository originally targets public IAD benchmarks such as MVTec AD, VisA, Real-IAD, and MPDD. For JBGS-2026-08, use the Omni-AD entry point added in this fork:
 
 ```bash
-python dinomaly_omniad_uni.py --mode train --data_path ../dataset/Omni-AD-30-release
+python dinomaly_omniad_uni.py --mode train --data_path ../dataset/download/Omni-AD-30-release
 ```
 
 ## Compliance Boundary
@@ -25,47 +25,45 @@ python dinomaly_omniad_uni.py --mode check
 Train a single multi-category model:
 
 ```bash
-python dinomaly_omniad_uni.py ^
-  --mode train ^
-  --data_path ../dataset/Omni-AD-30-release ^
-  --output_dir ./saved_results/omniad_dinomaly_uni
+python dinomaly_omniad_uni.py --mode train \
+  --data_path ../dataset/download/Omni-AD-30-release \
+  --output_dir ./saved_results/omniad_dinomaly_uni \
+  --batch_size 4
 ```
 
 Disable development-set evaluation during training:
 
 ```bash
-python dinomaly_omniad_uni.py ^
-  --mode train ^
-  --data_path ../dataset/Omni-AD-30-release ^
+python dinomaly_omniad_uni.py --mode train \
+  --data_path ../dataset/download/Omni-AD-30-release \
   --eval_every 0
 ```
+
+This is already the default. Enable periodic evaluation only when the labeled data is an allowed development split.
 
 Evaluate a saved checkpoint on the labeled development test split:
 
 ```bash
-python dinomaly_omniad_uni.py ^
-  --mode eval ^
-  --data_path ../dataset/Omni-AD-30-release ^
+python dinomaly_omniad_uni.py --mode eval \
+  --data_path ../dataset/download/Omni-AD-30-release \
   --checkpoint ./saved_results/omniad_dinomaly_uni/omniad_dinomaly_uni.pth
 ```
 
 Run pure-forward prediction and export anomaly scores plus `.npy` heatmaps:
 
 ```bash
-python dinomaly_omniad_uni.py ^
-  --mode predict ^
-  --data_path ../dataset/Omni-AD-30-release ^
-  --checkpoint ./saved_results/omniad_dinomaly_uni/omniad_dinomaly_uni.pth ^
+python dinomaly_omniad_uni.py --mode predict \
+  --data_path ../dataset/download/Omni-AD-30-release \
+  --checkpoint ./saved_results/omniad_dinomaly_uni/omniad_dinomaly_uni.pth \
   --output_dir ./predictions/omniad_dinomaly_uni
 ```
 
 Limit to a subset of categories while debugging:
 
 ```bash
-python dinomaly_omniad_uni.py ^
-  --mode train ^
-  --data_path ../dataset/Omni-AD-30-release ^
-  --categories air_conditioner_filter,battery_piece ^
+python dinomaly_omniad_uni.py --mode train \
+  --data_path ../dataset/download/Omni-AD-30-release \
+  --categories air_conditioner_filter,battery_piece \
   --total_iters 100
 ```
 
@@ -75,6 +73,29 @@ python dinomaly_omniad_uni.py ^
 - Training log: `saved_results/omniad_dinomaly_uni/log.txt`
 - Prediction score file: `predictions/omniad_dinomaly_uni/scores.csv`
 - Prediction heatmaps: one `.npy` file per test image, resized back to the input image size.
+
+## Small-defect Defaults
+
+- Inputs are letterboxed to `560x560`, preserving aspect ratio and all edge content.
+- Training samples categories uniformly so small categories such as `wafer2` are not underrepresented.
+- Mild color and translation augmentation is enabled for normal training images.
+- Evaluation and prediction use a `3x3`, sigma `1.0` Gaussian filter to retain small anomaly peaks.
+- Prediction removes letterbox padding before restoring heatmaps to original image coordinates.
+- Old checkpoints without preprocessing metadata automatically use the original resize-and-center-crop path.
+
+Train a higher-resolution `wafer2` specialist for comparison or ensembling:
+
+```bash
+python dinomaly_omniad_uni.py --mode train \
+  --data_path ../dataset/download/Omni-AD-30-release \
+  --categories wafer2 \
+  --output_dir ./saved_results/wafer2_784 \
+  --image_size 784 \
+  --crop_size 784 \
+  --eval_mask_size 784 \
+  --batch_size 2 \
+  --total_iters 3000
+```
 
 ## Next Packaging Steps
 

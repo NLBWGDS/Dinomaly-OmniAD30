@@ -10,12 +10,72 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from torch.utils.data import ConcatDataset, DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, WeightedRandomSampler
+from torchvision import transforms
 from torchvision.datasets import ImageFolder
+from torchvision.transforms import InterpolationMode
+from torchvision.transforms import functional as TF
 
 
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DATA_PATH = os.path.abspath(os.path.join(REPO_DIR, "..", "dataset", "Omni-AD-30-release"))
+DEFAULT_DATA_PATH = os.path.abspath(os.path.join(REPO_DIR, "..", "dataset", "download", "Omni-AD-30-release"))
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+class Letterbox:
+    def __init__(self, size, fill, interpolation):
+        self.size = size
+        self.fill = fill
+        self.interpolation = interpolation
+
+    def __call__(self, image):
+        width, height = image.size
+        scale = min(self.size / width, self.size / height)
+        resized_width = max(1, round(width * scale))
+        resized_height = max(1, round(height * scale))
+        image = TF.resize(
+            image,
+            [resized_height, resized_width],
+            interpolation=self.interpolation,
+            antialias=self.interpolation != InterpolationMode.NEAREST,
+        )
+        left = (self.size - resized_width) // 2
+        top = (self.size - resized_height) // 2
+        right = self.size - resized_width - left
+        bottom = self.size - resized_height - top
+        return TF.pad(image, [left, top, right, bottom], fill=self.fill)
+
+
+def get_omniad_transforms(args, train=False):
+    if args.preprocess == "legacy":
+        from dataset import get_data_transforms
+
+        return get_data_transforms(args.image_size, args.crop_size)
+
+    mean_fill = tuple(round(value * 255) for value in IMAGENET_MEAN)
+    image_ops = []
+    if train and args.train_augment:
+        image_ops.append(transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.05))
+    image_ops.append(Letterbox(args.crop_size, mean_fill, InterpolationMode.BICUBIC))
+    if train and args.train_augment:
+        image_ops.append(
+            transforms.RandomAffine(
+                degrees=0,
+                translate=(0.02, 0.02),
+                interpolation=InterpolationMode.BILINEAR,
+                fill=mean_fill,
+            )
+        )
+    image_ops.extend([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ])
+    mask_ops = [
+        Letterbox(args.crop_size, 0, InterpolationMode.NEAREST),
+        transforms.ToTensor(),
+    ]
+    return transforms.Compose(image_ops), transforms.Compose(mask_ops)
 
 
 def setup_seed(seed):
@@ -59,6 +119,9 @@ def discover_categories(data_path, categories=None):
             if os.path.isdir(os.path.join(data_path, item))
         )
 
+    if not selected:
+        raise RuntimeError(f"No categories found directly under: {data_path}")
+
     valid = []
     for item in selected:
         train_good = os.path.join(data_path, item, "train", "good")
@@ -97,9 +160,7 @@ def check_environment(args, item_list, logger):
     if torch.cuda.is_available():
         logger.info(f"cuda device: {torch.cuda.get_device_name(0)}")
 
-    from dataset import get_data_transforms
-
-    get_data_transforms(args.image_size, args.crop_size)
+    get_omniad_transforms(args)
     logger.info("check passed: dataset layout and core imports are ready.")
 
 
@@ -173,6 +234,8 @@ def make_train_loader(args, data_transform, item_list):
     for class_idx, item in enumerate(item_list):
         train_path = os.path.join(args.data_path, item, "train")
         train_data = ImageFolder(root=train_path, transform=data_transform)
+        if len(train_data) == 0:
+            raise RuntimeError(f"No supported training images found under: {train_path}")
         train_data.classes = [item]
         train_data.class_to_idx = {item: class_idx}
         train_data.samples = [(sample[0], class_idx) for sample in train_data.samples]
@@ -180,10 +243,18 @@ def make_train_loader(args, data_transform, item_list):
         train_data_list.append(train_data)
 
     train_data = ConcatDataset(train_data_list)
+    sampler = None
+    if args.category_balanced and len(train_data_list) > 1:
+        sample_weights = []
+        for dataset in train_data_list:
+            sample_weights.extend([1.0 / len(dataset)] * len(dataset))
+        sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_data), replacement=True)
+
     loader = DataLoader(
         train_data,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=args.num_workers,
         drop_last=True,
         pin_memory=torch.cuda.is_available(),
@@ -214,7 +285,15 @@ def evaluate_dev(model, args, data_transform, gt_transform, item_list, device, l
             num_workers=args.num_workers,
             pin_memory=torch.cuda.is_available(),
         )
-        result = evaluation_batch(model, test_loader, device, max_ratio=args.max_ratio, resize_mask=args.eval_mask_size)
+        result = evaluation_batch(
+            model,
+            test_loader,
+            device,
+            max_ratio=args.max_ratio,
+            resize_mask=args.eval_mask_size,
+            gaussian_kernel_size=args.gaussian_kernel_size,
+            gaussian_sigma=args.gaussian_sigma,
+        )
         metrics.append(result)
         logger.info(
             "{}: I-AUROC:{:.4f}, I-AP:{:.4f}, I-F1:{:.4f}, P-AUROC:{:.4f}, P-AP:{:.4f}, P-F1:{:.4f}, P-AUPRO:{:.4f}".format(
@@ -233,13 +312,13 @@ def evaluate_dev(model, args, data_transform, gt_transform, item_list, device, l
 
 
 def train(args, item_list, device, logger):
-    from dataset import get_data_transforms
     from optimizers import StableAdamW
     from utils import WarmCosineScheduler, global_cosine_hm_percent
 
     setup_seed(args.seed)
-    data_transform, gt_transform = get_data_transforms(args.image_size, args.crop_size)
-    train_data, train_loader = make_train_loader(args, data_transform, item_list)
+    train_transform, _ = get_omniad_transforms(args, train=True)
+    data_transform, gt_transform = get_omniad_transforms(args)
+    train_data, train_loader = make_train_loader(args, train_transform, item_list)
     model, trainable = build_model(args.encoder, device)
 
     optimizer = StableAdamW(
@@ -261,6 +340,10 @@ def train(args, item_list, device, logger):
     logger.info(f"categories: {', '.join(item_list)}")
     logger.info(f"train images: {len(train_data)}")
     logger.info(f"encoder: {args.encoder}")
+    logger.info(
+        f"preprocess: {args.preprocess}, input: {args.crop_size}, "
+        f"category_balanced: {args.category_balanced}, augmentation: {args.train_augment}"
+    )
     logger.info("compliance: training reads Omni-AD train/good only; dev labels are used only for optional evaluation.")
 
     it = 0
@@ -303,6 +386,10 @@ def train(args, item_list, device, logger):
             "encoder": args.encoder,
             "image_size": args.image_size,
             "crop_size": args.crop_size,
+            "eval_mask_size": args.eval_mask_size,
+            "preprocess": args.preprocess,
+            "gaussian_kernel_size": args.gaussian_kernel_size,
+            "gaussian_sigma": args.gaussian_sigma,
         },
         checkpoint_path,
     )
@@ -341,13 +428,71 @@ def load_checkpoint_model(args, device):
     return model, checkpoint
 
 
+def apply_checkpoint_preprocessing(args, checkpoint):
+    args.image_size = checkpoint.get("image_size", args.image_size)
+    args.crop_size = checkpoint.get("crop_size", args.crop_size)
+    # Checkpoints created before letterbox support used resize + center crop.
+    args.preprocess = checkpoint.get("preprocess", "legacy")
+    args.eval_mask_size = checkpoint.get(
+        "eval_mask_size",
+        256 if "preprocess" not in checkpoint else args.crop_size,
+    )
+
+
+def restore_anomaly_map(anomaly_map, original_h, original_w, args):
+    if args.preprocess == "letterbox":
+        target = anomaly_map.shape[-1]
+        scale = min(target / original_w, target / original_h)
+        resized_w = max(1, round(original_w * scale))
+        resized_h = max(1, round(original_h * scale))
+        left = (target - resized_w) // 2
+        top = (target - resized_h) // 2
+        anomaly_map = anomaly_map[:, :, top:top + resized_h, left:left + resized_w]
+    else:
+        canvas = anomaly_map.new_zeros((1, 1, args.image_size, args.image_size))
+        offset = max(0, (args.image_size - args.crop_size) // 2)
+        crop = F.interpolate(
+            anomaly_map,
+            size=(args.crop_size, args.crop_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+        canvas[:, :, offset:offset + args.crop_size, offset:offset + args.crop_size] = crop
+        anomaly_map = canvas
+
+    return F.interpolate(
+        anomaly_map,
+        size=(original_h, original_w),
+        mode="bilinear",
+        align_corners=False,
+    )
+
+
+def score_anomaly_map(anomaly_map, original_h, original_w, args):
+    if args.preprocess == "letterbox":
+        target = anomaly_map.shape[-1]
+        scale = min(target / original_w, target / original_h)
+        resized_w = max(1, round(original_w * scale))
+        resized_h = max(1, round(original_h * scale))
+        left = (target - resized_w) // 2
+        top = (target - resized_h) // 2
+        anomaly_map = anomaly_map[:, :, top:top + resized_h, left:left + resized_w]
+
+    flat_map = anomaly_map.flatten()
+    topk = max(1, int(flat_map.numel() * args.max_ratio))
+    return torch.topk(flat_map, topk).values.mean().item()
+
+
 def predict(args, item_list, device, logger):
-    from dataset import get_data_transforms
     from utils import cal_anomaly_maps, get_gaussian_kernel
 
-    data_transform, _ = get_data_transforms(args.image_size, args.crop_size)
     model, checkpoint = load_checkpoint_model(args, device)
-    gaussian_kernel = get_gaussian_kernel(kernel_size=5, sigma=4).to(device)
+    apply_checkpoint_preprocessing(args, checkpoint)
+    data_transform, _ = get_omniad_transforms(args)
+    gaussian_kernel = get_gaussian_kernel(
+        kernel_size=args.gaussian_kernel_size,
+        sigma=args.gaussian_sigma,
+    ).to(device)
     os.makedirs(args.output_dir, exist_ok=True)
 
     score_path = os.path.join(args.output_dir, "scores.csv")
@@ -377,24 +522,28 @@ def predict(args, item_list, device, logger):
                     en, de = model(img)
                     anomaly_map, _ = cal_anomaly_maps(en, de, img.shape[-1])
                     anomaly_map = gaussian_kernel(anomaly_map)
-                    scores = torch.sort(anomaly_map.flatten(1), dim=1, descending=True)[0]
-                    topk = max(1, int(scores.shape[1] * args.max_ratio))
-                    scores = scores[:, :topk].mean(dim=1).cpu().numpy()
 
                     for batch_idx, path in enumerate(paths):
                         original_h = int(original_sizes[batch_idx][0])
                         original_w = int(original_sizes[batch_idx][1])
-                        resized_map = F.interpolate(
+                        restored_map = restore_anomaly_map(
                             anomaly_map[batch_idx:batch_idx + 1],
-                            size=(original_h, original_w),
-                            mode="bilinear",
-                            align_corners=False,
-                        )[0, 0].cpu().numpy()
+                            original_h,
+                            original_w,
+                            args,
+                        )
+                        image_score = score_anomaly_map(
+                            anomaly_map[batch_idx:batch_idx + 1],
+                            original_h,
+                            original_w,
+                            args,
+                        )
+                        resized_map = restored_map[0, 0].cpu().numpy()
                         rel = os.path.relpath(path, test_root)
                         safe_name = rel.replace(os.sep, "__")
                         map_path = os.path.join(item_output, os.path.splitext(safe_name)[0] + ".npy")
                         np.save(map_path, resized_map)
-                        writer.writerow([item, path, float(scores[batch_idx]), map_path])
+                        writer.writerow([item, path, image_score, map_path])
 
     logger.info(f"saved prediction scores: {score_path}")
     logger.info(f"checkpoint categories: {', '.join(checkpoint.get('categories', []))}")
@@ -408,10 +557,15 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="./saved_results/omniad_dinomaly_uni")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--encoder", type=str, default="dinov2reg_vit_base_14")
-    parser.add_argument("--image_size", type=int, default=448)
-    parser.add_argument("--crop_size", type=int, default=392)
-    parser.add_argument("--eval_mask_size", type=int, default=256)
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--image_size", type=int, default=560, help="Legacy resize size; retained for old checkpoints.")
+    parser.add_argument("--crop_size", type=int, default=560, help="Model input size. Use a multiple of the patch size.")
+    parser.add_argument("--eval_mask_size", type=int, default=560)
+    parser.add_argument("--preprocess", choices=["letterbox", "legacy"], default="letterbox")
+    parser.add_argument("--train_augment", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--category_balanced", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gaussian_kernel_size", type=int, default=3)
+    parser.add_argument("--gaussian_sigma", type=float, default=1.0)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--total_iters", type=int, default=10000)
     parser.add_argument("--lr", type=float, default=2e-3)
@@ -424,23 +578,34 @@ def parse_args():
     parser.add_argument("--grad_clip", type=float, default=0.1)
     parser.add_argument("--max_ratio", type=float, default=0.01)
     parser.add_argument("--log_every", type=int, default=100)
-    parser.add_argument("--eval_every", type=int, default=5000, help="Set 0 to disable dev-set evaluation during training.")
+    parser.add_argument("--eval_every", type=int, default=0, help="Set above 0 only for a labeled development split.")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
 
 
-if __name__ == "__main__":
-    from dataset import get_data_transforms
+def validate_args(args):
+    if args.crop_size <= 0 or args.eval_mask_size <= 0:
+        raise ValueError("--crop_size and --eval_mask_size must be positive")
+    if args.gaussian_kernel_size <= 0 or args.gaussian_kernel_size % 2 == 0:
+        raise ValueError("--gaussian_kernel_size must be a positive odd number")
+    if not 0 <= args.max_ratio <= 1:
+        raise ValueError("--max_ratio must be between 0 and 1")
+    if args.preprocess == "legacy" and args.image_size < args.crop_size:
+        raise ValueError("legacy preprocessing requires --image_size >= --crop_size")
+    patch_size = int(args.encoder.rsplit("_", 1)[-1])
+    if args.crop_size % patch_size != 0:
+        raise ValueError(f"--crop_size must be divisible by encoder patch size {patch_size}")
 
+
+if __name__ == "__main__":
     args = parse_args()
+    validate_args(args)
     logger = get_logger("omniad_dinomaly_uni", None if args.mode == "check" else args.output_dir)
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     logger.info(f"device: {device}")
 
     item_list = discover_categories(args.data_path, args.categories)
-    data_transform, gt_transform = get_data_transforms(args.image_size, args.crop_size)
-
     if args.mode == "check":
         check_environment(args, item_list, logger)
     elif args.mode == "train":
@@ -448,7 +613,9 @@ if __name__ == "__main__":
     elif args.mode == "eval":
         if args.checkpoint is None:
             raise ValueError("--checkpoint is required for eval mode")
-        model, _ = load_checkpoint_model(args, device)
+        model, checkpoint = load_checkpoint_model(args, device)
+        apply_checkpoint_preprocessing(args, checkpoint)
+        data_transform, gt_transform = get_omniad_transforms(args)
         evaluate_dev(model, args, data_transform, gt_transform, item_list, device, logger)
     else:
         if args.checkpoint is None:

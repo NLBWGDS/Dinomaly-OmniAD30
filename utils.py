@@ -344,13 +344,18 @@ def evaluation(model, dataloader, device, _class_=None, calc_pro=True, norm_fact
     return auroc_px, auroc_sp, round(np.mean(aupro_list), 4)
 
 
-def evaluation_batch(model, dataloader, device, _class_=None, max_ratio=0, resize_mask=None):
+def evaluation_batch(
+        model, dataloader, device, _class_=None, max_ratio=0, resize_mask=None,
+        gaussian_kernel_size=5, gaussian_sigma=4):
     model.eval()
     gt_list_px = []
     pr_list_px = []
     gt_list_sp = []
     pr_list_sp = []
-    gaussian_kernel = get_gaussian_kernel(kernel_size=5, sigma=4).to(device)
+    gaussian_kernel = get_gaussian_kernel(
+        kernel_size=gaussian_kernel_size,
+        sigma=gaussian_sigma,
+    ).to(device)
 
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 

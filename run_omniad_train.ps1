@@ -1,7 +1,7 @@
 param(
-    [string]$DataPath = "..\dataset\Omni-AD-30-release",
+    [string]$DataPath = "..\dataset\download\Omni-AD-30-release",
     [string]$OutputDir = ".\saved_results\omniad_dinomaly_uni",
-    [int]$BatchSize = 16,
+    [int]$BatchSize = 4,
     [int]$TotalIters = 10000,
     [int]$NumWorkers = 4
 )
