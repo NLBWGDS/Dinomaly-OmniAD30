@@ -292,7 +292,7 @@ def evaluate_dev(model, args, data_transform, gt_transform, item_list, device, l
             resize_mask=args.eval_mask_size,
             gaussian_kernel_size=args.gaussian_kernel_size,
             gaussian_sigma=args.gaussian_sigma,
-            feature_weights=args.feature_weights,
+            feature_weights=get_feature_weights(args, item),
         )
         metrics.append(result)
         logger.info(
@@ -524,7 +524,7 @@ def predict(args, item_list, device, logger):
                         en,
                         de,
                         img.shape[-1],
-                        feature_weights=args.feature_weights,
+                        feature_weights=get_feature_weights(args, item),
                     )
                     anomaly_map = gaussian_kernel(anomaly_map)
 
@@ -576,6 +576,12 @@ def parse_args():
         default=None,
         help="Comma-separated shallow,deep anomaly-map weights. Default: 0.5,0.5.",
     )
+    parser.add_argument(
+        "--category_feature_weights",
+        type=parse_category_feature_weights,
+        default={},
+        help="Per-category overrides, e.g. 'wafer2=0.25,0.75;iron_lattice=0.5,0.5'.",
+    )
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--total_iters", type=int, default=10000)
@@ -607,6 +613,28 @@ def parse_feature_weights(value):
     return weights
 
 
+def parse_category_feature_weights(value):
+    result = {}
+    for assignment in value.split(";"):
+        assignment = assignment.strip()
+        if not assignment:
+            continue
+        if "=" not in assignment:
+            raise argparse.ArgumentTypeError(
+                "category feature weights must use category=shallow,deep"
+            )
+        category, weights = assignment.split("=", 1)
+        category = category.strip()
+        if not category or category in result:
+            raise argparse.ArgumentTypeError("category names must be non-empty and unique")
+        result[category] = parse_feature_weights(weights)
+    return result
+
+
+def get_feature_weights(args, category):
+    return args.category_feature_weights.get(category, args.feature_weights)
+
+
 def validate_args(args):
     if args.crop_size <= 0 or args.eval_mask_size <= 0:
         raise ValueError("--crop_size and --eval_mask_size must be positive")
@@ -616,6 +644,9 @@ def validate_args(args):
         raise ValueError("--max_ratio must be between 0 and 1")
     if args.preprocess == "legacy" and args.image_size < args.crop_size:
         raise ValueError("legacy preprocessing requires --image_size >= --crop_size")
+    unknown_categories = set(args.category_feature_weights) - set(discover_categories(args.data_path, args.categories))
+    if unknown_categories:
+        raise ValueError(f"Unknown categories in --category_feature_weights: {sorted(unknown_categories)}")
     patch_size = int(args.encoder.rsplit("_", 1)[-1])
     if args.crop_size % patch_size != 0:
         raise ValueError(f"--crop_size must be divisible by encoder patch size {patch_size}")

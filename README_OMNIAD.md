@@ -83,6 +83,7 @@ python dinomaly_omniad_uni.py --mode train \
 - Prediction removes letterbox padding before restoring heatmaps to original image coordinates.
 - Old checkpoints without preprocessing metadata automatically use the original resize-and-center-crop path.
 - `--feature_weights shallow,deep` can favor local texture features during evaluation and prediction without retraining.
+- `--category_feature_weights` applies validated per-category overrides for routed post-processing.
 
 Train a higher-resolution `wafer2` specialist for comparison or ensembling:
 
