@@ -82,6 +82,7 @@ python dinomaly_omniad_uni.py --mode train \
 - Evaluation and prediction use a `3x3`, sigma `1.0` Gaussian filter to retain small anomaly peaks.
 - Prediction removes letterbox padding before restoring heatmaps to original image coordinates.
 - Old checkpoints without preprocessing metadata automatically use the original resize-and-center-crop path.
+- `--feature_weights shallow,deep` can favor local texture features during evaluation and prediction without retraining.
 
 Train a higher-resolution `wafer2` specialist for comparison or ensembling:
 

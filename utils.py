@@ -207,7 +207,7 @@ def cal_anomaly_map(fs_list, ft_list, out_size=224, amap_mode='add', norm_factor
     return anomaly_map, a_map_list
 
 
-def cal_anomaly_maps(fs_list, ft_list, out_size=224):
+def cal_anomaly_maps(fs_list, ft_list, out_size=224, feature_weights=None):
     if not isinstance(out_size, tuple):
         out_size = (out_size, out_size)
 
@@ -219,7 +219,19 @@ def cal_anomaly_maps(fs_list, ft_list, out_size=224):
         a_map = torch.unsqueeze(a_map, dim=1)
         a_map = F.interpolate(a_map, size=out_size, mode='bilinear', align_corners=True)
         a_map_list.append(a_map)
-    anomaly_map = torch.cat(a_map_list, dim=1).mean(dim=1, keepdim=True)
+    stacked_maps = torch.cat(a_map_list, dim=1)
+    if feature_weights is None:
+        anomaly_map = stacked_maps.mean(dim=1, keepdim=True)
+    else:
+        if len(feature_weights) != stacked_maps.shape[1]:
+            raise ValueError(
+                f"Expected {stacked_maps.shape[1]} feature weights, got {len(feature_weights)}"
+            )
+        weights = stacked_maps.new_tensor(feature_weights)
+        if torch.any(weights < 0) or weights.sum() <= 0:
+            raise ValueError("Feature weights must be non-negative and have a positive sum")
+        weights = weights / weights.sum()
+        anomaly_map = (stacked_maps * weights.view(1, -1, 1, 1)).sum(dim=1, keepdim=True)
     return anomaly_map, a_map_list
 
 
@@ -346,7 +358,7 @@ def evaluation(model, dataloader, device, _class_=None, calc_pro=True, norm_fact
 
 def evaluation_batch(
         model, dataloader, device, _class_=None, max_ratio=0, resize_mask=None,
-        gaussian_kernel_size=5, gaussian_sigma=4):
+        gaussian_kernel_size=5, gaussian_sigma=4, feature_weights=None):
     model.eval()
     gt_list_px = []
     pr_list_px = []
@@ -369,7 +381,12 @@ def evaluation_batch(
             # curr_time = starter.elapsed_time(ender)
             en, de = output[0], output[1]
 
-            anomaly_map, _ = cal_anomaly_maps(en, de, img.shape[-1])
+            anomaly_map, _ = cal_anomaly_maps(
+                en,
+                de,
+                img.shape[-1],
+                feature_weights=feature_weights,
+            )
             # anomaly_map = anomaly_map - anomaly_map.mean(dim=[1, 2, 3]).view(-1, 1, 1, 1)
 
             if resize_mask is not None:

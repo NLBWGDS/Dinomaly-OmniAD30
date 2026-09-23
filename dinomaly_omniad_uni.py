@@ -38,7 +38,6 @@ class Letterbox:
             image,
             [resized_height, resized_width],
             interpolation=self.interpolation,
-            antialias=self.interpolation != InterpolationMode.NEAREST,
         )
         left = (self.size - resized_width) // 2
         top = (self.size - resized_height) // 2
@@ -293,6 +292,7 @@ def evaluate_dev(model, args, data_transform, gt_transform, item_list, device, l
             resize_mask=args.eval_mask_size,
             gaussian_kernel_size=args.gaussian_kernel_size,
             gaussian_sigma=args.gaussian_sigma,
+            feature_weights=args.feature_weights,
         )
         metrics.append(result)
         logger.info(
@@ -520,7 +520,12 @@ def predict(args, item_list, device, logger):
                 for img, paths, original_sizes in loader:
                     img = img.to(device, non_blocking=True)
                     en, de = model(img)
-                    anomaly_map, _ = cal_anomaly_maps(en, de, img.shape[-1])
+                    anomaly_map, _ = cal_anomaly_maps(
+                        en,
+                        de,
+                        img.shape[-1],
+                        feature_weights=args.feature_weights,
+                    )
                     anomaly_map = gaussian_kernel(anomaly_map)
 
                     for batch_idx, path in enumerate(paths):
@@ -565,6 +570,12 @@ def parse_args():
     parser.add_argument("--category_balanced", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gaussian_kernel_size", type=int, default=3)
     parser.add_argument("--gaussian_sigma", type=float, default=1.0)
+    parser.add_argument(
+        "--feature_weights",
+        type=parse_feature_weights,
+        default=None,
+        help="Comma-separated shallow,deep anomaly-map weights. Default: 0.5,0.5.",
+    )
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--total_iters", type=int, default=10000)
@@ -582,6 +593,18 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
+
+
+def parse_feature_weights(value):
+    try:
+        weights = [float(item.strip()) for item in value.split(",")]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("feature weights must be comma-separated numbers") from exc
+    if len(weights) != 2:
+        raise argparse.ArgumentTypeError("exactly two feature weights are required: shallow,deep")
+    if any(weight < 0 for weight in weights) or sum(weights) <= 0:
+        raise argparse.ArgumentTypeError("feature weights must be non-negative with a positive sum")
+    return weights
 
 
 def validate_args(args):
