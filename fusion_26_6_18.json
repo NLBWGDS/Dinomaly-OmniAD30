@@ -1,0 +1,9 @@
+{
+  "pixel_candidate_weights": {
+    "infusion_bottle_bottom5": 0.0,
+    "iron_lattice": 1.0,
+    "wafer2": 0.5
+  },
+  "image_source": "baseline_map",
+  "image_top_ratio": 0.01
+}
