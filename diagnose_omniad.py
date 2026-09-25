@@ -23,7 +23,10 @@ def locate(row, predictions, data):
         raise ValueError(f'Invalid test path: {relative}')
     image = data / category / 'test' / relative
     exported = Path(row['map_path'])
-    candidates = [exported, predictions / category / row['map_path'].replace('\\', '/').split('/')[-1]]
+    # Prefer maps in this prediction directory, including nested routed exports.
+    candidates = [predictions / category / (str(relative) + '.npy'),
+                  predictions / category / row['map_path'].replace('\\', '/').split('/')[-1],
+                  exported]
     maps = next((p for p in candidates if p.is_file()), None)
     if maps is None:
         raise FileNotFoundError(row['map_path'])

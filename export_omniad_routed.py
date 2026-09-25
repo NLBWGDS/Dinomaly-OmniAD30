@@ -28,8 +28,9 @@ def read_index(folder):
             key = (category, relative.as_posix())
             if key in result:
                 raise ValueError(f'Duplicate prediction: {key}')
+            nested = folder / category / (relative.as_posix() + '.npy')
             local = folder / category / PurePosixPath(row['map_path'].replace('\\', '/')).name
-            path = local if local.is_file() else Path(row['map_path'])
+            path = next((p for p in (nested, local, Path(row['map_path'])) if p.is_file()), nested)
             if not path.is_file():
                 raise FileNotFoundError(path)
             result[key] = (row, path)
@@ -51,7 +52,7 @@ def proxy(metrics):
     keys = ('pixel_f1', 'pixel_aupro', 'image_f1')
     if any(metrics[k] is None for k in keys):
         return None
-    return sum(w * metrics[k] for w, k in zip((26, 6, 18), keys))
+    return sum(w * metrics[k] for w, k in zip((25, 6, 18), keys))
 
 
 def main():
@@ -101,11 +102,12 @@ def main():
             previous = comparison['categories'][category]
             metrics = {k: previous[name][k] for k in ('pixel_f1', 'pixel_aupro', 'image_f1')}
             metrics['image_f1'] = previous['baseline']['image_f1']
-            metrics['weighted_proxy_50'] = proxy(metrics)
-            metrics['baseline_proxy_50'] = proxy(previous['baseline'])
+            metrics['priority_objective'] = proxy(metrics)
+            metrics['baseline_priority_objective'] = proxy(previous['baseline'])
             estimates[category] = metrics
             print(category, json.dumps(metrics), flush=True)
         manifest['estimates_from_supplied_report_not_remeasured'] = estimates
+    manifest['priority_weights'] = dict(pixel_f1=25, pixel_aupro=6, image_f1=18)
     (output / 'routing_manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
     print(f'Exported {len(base)} predictions to {output}')
 

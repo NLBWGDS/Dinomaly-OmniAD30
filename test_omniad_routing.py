@@ -21,7 +21,7 @@ class RoutingTests(unittest.TestCase):
             fuse(np.ones((2, 2)), np.full((2, 2), np.nan), .5, .01)
 
     def test_weight_order(self):
-        self.assertEqual(proxy(dict(pixel_f1=1, pixel_aupro=0, image_f1=0)), 26)
+        self.assertEqual(proxy(dict(pixel_f1=1, pixel_aupro=0, image_f1=0)), 25)
         self.assertEqual(proxy(dict(pixel_f1=0, pixel_aupro=1, image_f1=0)), 6)
         self.assertEqual(proxy(dict(pixel_f1=0, pixel_aupro=0, image_f1=1)), 18)
 
