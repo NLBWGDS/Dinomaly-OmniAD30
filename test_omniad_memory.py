@@ -10,11 +10,23 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from omniad_memory import descriptors, valid_patches, nearest_distance, calibration_scale
+from omniad_memory import descriptors, valid_patches, nearest_distance, calibration_scale, coreset_indices
 from predict_omniad_memory import run
 
 
 class MemoryTests(unittest.TestCase):
+    def test_coreset_coverage_and_reproducibility(self):
+        x = torch.tensor([[0., 0.]] * 20 + [[10., 0.], [0., 10.]])
+        selected = coreset_indices(x, 3, seed=7)
+        torch.testing.assert_close(selected, coreset_indices(x, 3, seed=7))
+        self.assertEqual(selected.unique().numel(), 3)
+        self.assertEqual(torch.cdist(x, x[selected]).min(dim=1).values.max().item(), 0.)
+        duplicate = coreset_indices(torch.ones(12, 5), 8, projection_dim=2)
+        self.assertEqual(duplicate.unique().numel(), 8)
+        torch.testing.assert_close(coreset_indices(x, len(x)), torch.arange(len(x)))
+        with self.assertRaises(ValueError):
+            coreset_indices(x, len(x) + 1)
+
     def test_weighted_cosine_and_chunking(self):
         features = [torch.tensor([[[[1., 0.]], [[0., 1.]]]]),
                     torch.tensor([[[[1., 1.]], [[0., 0.]]]])]
@@ -96,6 +108,15 @@ class MemoryTests(unittest.TestCase):
             self.assertTrue(np.isfinite(result).all())
             self.assertFalse(np.allclose(result, .2))
             self.assertTrue((output / 'normal_bank.pt').is_file())
+            args.output_dir = str(root / 'coreset')
+            args.sampling, args.candidate_multiplier, args.projection_dim = 'coreset', 2, 2
+            with patch.dict('sys.modules', {'dinomaly_omniad_uni': fake}):
+                run(args)
+            artifact = torch.load(root / 'coreset/normal_bank.pt', weights_only=True)
+            self.assertEqual(artifact['sampling'], 'coreset')
+            self.assertEqual(artifact['bank'].shape[0], 16)
+            self.assertEqual(artifact['candidate_count'], 32)
+            self.assertGreaterEqual(artifact['owners'].unique().numel(), 2)
 
 
 if __name__ == '__main__':

@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from export_omniad_routed import read_index
-from omniad_memory import descriptors, valid_patches, nearest_distance, calibration_scale
+from omniad_memory import descriptors, valid_patches, nearest_distance, calibration_scale, coreset_indices
 
 
 def run(args):
@@ -32,6 +32,11 @@ def run(args):
         raise ValueError('memory_weight must be in [0,1]')
     if args.bank_size < 2 or args.query_chunk < 1:
         raise ValueError('bank_size >= 2 and query_chunk >= 1 are required')
+    sampling = getattr(args, 'sampling', 'random')
+    multiplier = getattr(args, 'candidate_multiplier', 4)
+    projection_dim = getattr(args, 'projection_dim', 64)
+    if sampling not in ('random', 'coreset') or multiplier < 1 or projection_dim < 1:
+        raise ValueError('Invalid sampling mode, candidate multiplier or projection dimension')
     records = read_index(Path(args.predictions))
     if not records or args.category not in {key[0] for key in records}:
         raise ValueError('Selected category is absent from source predictions')
@@ -79,18 +84,31 @@ def run(args):
     output.mkdir(parents=True, exist_ok=False)
     generator = torch.Generator().manual_seed(args.seed)
     quota = args.bank_size // len(normal_paths)
+    candidate_quota = quota * (multiplier if sampling == 'coreset' else 1)
     with torch.inference_mode():
         chunks, owner_chunks = [], []
         for i, path in enumerate(normal_paths):
             patches, _, valid, _ = extract(path)
             patches = patches[valid].cpu()
-            indices = torch.randperm(len(patches), generator=generator)[:quota]
+            indices = torch.randperm(len(patches), generator=generator)[:candidate_quota]
             chunks.append(patches[indices])
             owner_chunks.append(torch.full((len(indices),), i, dtype=torch.long))
             print(f'Normal bank: {i+1}/{len(normal_paths)}', flush=True)
         bank = torch.cat(chunks).to(device)
         owners = torch.cat(owner_chunks).to(device)
         del chunks, owner_chunks
+        candidate_count = len(bank)
+        selection_start = time.perf_counter()
+        if sampling == 'coreset':
+            target_count = min(quota * len(normal_paths), len(bank))
+            print(f'Coreset selection: {len(bank)} candidates -> {target_count} patches', flush=True)
+            indices = coreset_indices(bank, target_count, projection_dim, args.seed)
+            bank, owners = bank[indices], owners[indices]
+            if owners.unique().numel() < 2:
+                raise ValueError('Coreset covers fewer than two images; increase bank_size')
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        selection_seconds = time.perf_counter() - selection_start
         normal_rec, normal_mem = [], []
         for i, path in enumerate(normal_paths):
             patches, reconstruction, valid, _ = extract(path)
@@ -102,7 +120,8 @@ def run(args):
         scale = calibration_scale(torch.cat(normal_rec), torch.cat(normal_mem))
         torch.save(dict(bank=bank.cpu(), owners=owners.cpu(), scale=scale,
                         normal_paths=[str(p.resolve()) for p in normal_paths],
-                        arguments=vars(args), crop_size=model_args.crop_size), output / 'normal_bank.pt')
+                        arguments=vars(args), crop_size=model_args.crop_size,
+                        sampling=sampling, candidate_count=candidate_count), output / 'normal_bank.pt')
         print(f'Bank patches: {len(bank)}, normal-only scale: {scale:.6f}', flush=True)
         timings = []
         with (output / 'scores.csv').open('w', newline='', encoding='utf-8') as handle:
@@ -136,7 +155,10 @@ def run(args):
                     normal_images=[str(p.resolve()) for p in normal_paths],
                     image_scores='Copied verbatim; unselected category maps copied byte-for-byte',
                     calibration='95th percentile ratio, leave-one-normal-image-out; no anomaly labels',
-                    sampling='Equal per-image random sampling; NOT PatchCore coreset selection',
+                    sampling=sampling, candidate_count=candidate_count,
+                    selection_seconds=selection_seconds,
+                    sampling_note='Random per-image pool; optional projected farthest-first coreset. '
+                                  'Original full-dimensional features retained for retrieval; not full PatchCore.',
                     mean_branch_ms=float(np.mean(timings)),
                     timing_note='Additional branch including IO, no warmup. Excludes prior baseline inference.',
                     status='Experimental; no accuracy or single-model-bonus guarantee')
@@ -154,6 +176,9 @@ if __name__ == '__main__':
     parser.add_argument('--feature_weights', default='0.25,0.75')
     parser.add_argument('--memory_weight', type=float, default=0.25)
     parser.add_argument('--bank_size', type=int, default=8192)
+    parser.add_argument('--sampling', choices=['random', 'coreset'], default='random')
+    parser.add_argument('--candidate_multiplier', type=int, default=4)
+    parser.add_argument('--projection_dim', type=int, default=64)
     parser.add_argument('--query_chunk', type=int, default=256)
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--device', default='cuda:0')

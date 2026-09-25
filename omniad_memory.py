@@ -6,6 +6,39 @@ import torch
 import torch.nn.functional as F
 
 
+@torch.no_grad()
+def coreset_indices(features, count, projection_dim=64, seed=1):
+    """Projected farthest-first selection, without a quadratic distance matrix.
+
+    Inspired by PatchCore coreset coverage. Returns original row indices so
+    source-image ownership survives selection for leave-one-image-out fitting.
+    Projection and initialization differ from the official implementation.
+    """
+    if features.ndim != 2 or min(features.shape) < 1 or not 1 <= count <= len(features):
+        raise ValueError('Invalid candidate matrix or coreset count')
+    if projection_dim < 1 or not torch.isfinite(features).all():
+        raise ValueError('Projection dimension must be positive and candidates finite')
+    if count == len(features):
+        return torch.arange(count, device=features.device)
+    generator = torch.Generator().manual_seed(seed)
+    x = features.float()
+    if x.shape[1] > projection_dim:
+        projection = torch.randn(x.shape[1], projection_dim, generator=generator) / math.sqrt(projection_dim)
+        x = x @ projection.to(x.device)
+    norms = x.square().sum(dim=1)
+    closest = torch.full((len(x),), float('inf'), device=x.device)
+    current = torch.randint(len(x), (1,), generator=generator).to(x.device).squeeze(0)
+    selected = torch.empty(count, dtype=torch.long, device=x.device)
+    for i in range(count):
+        selected[i] = current
+        distance = (norms + norms[current] - 2 * (x @ x[current])).clamp_min(0)
+        closest = torch.minimum(closest, distance)
+        # Negative sentinels prevent duplicates even when all candidates coincide.
+        closest[current] = -1
+        current = closest.argmax()
+    return selected
+
+
 def descriptors(features, weights):
     if not features or len(features) != len(weights):
         raise ValueError('One weight per feature group is required')
