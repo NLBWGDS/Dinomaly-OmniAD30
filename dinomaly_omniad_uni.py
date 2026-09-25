@@ -584,6 +584,9 @@ def predict(args, item_list, device, logger):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Dinomaly reproduction entry for Omni-AD style data.")
+    parser.add_argument('--tile_grid', type=int, default=2, help='Used by predict_omniad_tiled.py only.')
+    parser.add_argument('--tile_overlap', type=float, default=0.25, help='Used by tiled inference only.')
+    parser.add_argument('--global_weight', type=float, default=0.25, help='Full-image map weight in tiled inference.')
     parser.add_argument("--mode", choices=["check", "train", "eval", "predict"], default="train")
     parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATH)
     parser.add_argument("--categories", type=str, default=None, help="Comma-separated category list. Default: auto-discover.")
