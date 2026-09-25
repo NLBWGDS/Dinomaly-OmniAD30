@@ -101,6 +101,42 @@ python dinomaly_omniad_uni.py --mode train \
 
 ## Next Packaging Steps
 
+### Pixel-F1 experiment: local normal reconstruction
+
+`--loss local_hard` adds per-pixel cosine reconstruction to global reconstruction.
+The local term balances the mean error with the hardest normal locations, mined
+separately for each image. Mining warms up from all locations to the top 10%.
+This targets normal-texture false positives; it does not directly optimize F1
+and improvement must be measured. The default remains `--loss legacy`.
+
+Fine-tune an existing hard3 model without replacing the baseline:
+
+```bash
+python -u dinomaly_omniad_uni.py --mode train \
+  --categories wafer2,infusion_bottle_bottom5,iron_lattice \
+  --init_checkpoint ./saved_results/hard3_784/omniad_dinomaly_uni.pth \
+  --output_dir ./saved_results/hard3_local_f1 \
+  --image_size 784 --crop_size 784 --eval_mask_size 784 \
+  --batch_size 2 --total_iters 2000 --lr 0.0001 --final_lr 0.00001 \
+  --loss local_hard --local_loss_weight 0.5 --no-train_augment --eval_every 0
+```
+
+The optimizer starts fresh; this is weight initialization, not exact resumption.
+Evaluate the baseline and experiment with identical geometry and feature weights.
+Pixel F1 and image F1 reported by the existing evaluator are maximum F1 over
+labeled thresholds, not a deployed fixed-threshold F1. Only use an authorized
+development split for model selection. Historical center-crop and letterbox
+scores have different evaluation domains and are not controlled comparisons.
+
+```bash
+python -u dinomaly_omniad_uni.py --mode eval \
+  --categories wafer2,infusion_bottle_bottom5,iron_lattice \
+  --checkpoint ./saved_results/hard3_local_f1/omniad_dinomaly_uni.pth \
+  --batch_size 2 --category_feature_weights 'wafer2=0.25,0.75;infusion_bottle_bottom5=0.25,0.75'
+```
+
+Regression checks: `python -m unittest test_omniad_losses -v`.
+
 1. Put allowed public backbone weights in `backbones/weights/` or allow the Docker build/runtime to download from the official source permitted by the platform.
 2. Add the platform-required train and inference shell wrappers once the organizer publishes the exact command contract.
 3. In the technical report, disclose the default backbone and state that no external industrial anomaly detection data is used.

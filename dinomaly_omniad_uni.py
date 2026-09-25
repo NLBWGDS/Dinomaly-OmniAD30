@@ -233,6 +233,8 @@ def make_train_loader(args, data_transform, item_list):
     for class_idx, item in enumerate(item_list):
         train_path = os.path.join(args.data_path, item, "train")
         train_data = ImageFolder(root=train_path, transform=data_transform)
+        good_label = train_data.class_to_idx.get("good")
+        train_data.samples = [(path, label) for path, label in train_data.samples if label == good_label]
         if len(train_data) == 0:
             raise RuntimeError(f"No supported training images found under: {train_path}")
         train_data.classes = [item]
@@ -255,7 +257,7 @@ def make_train_loader(args, data_transform, item_list):
         shuffle=sampler is None,
         sampler=sampler,
         num_workers=args.num_workers,
-        drop_last=True,
+        drop_last=False,
         pin_memory=torch.cuda.is_available(),
     )
     return train_data, loader
@@ -320,6 +322,14 @@ def train(args, item_list, device, logger):
     data_transform, gt_transform = get_omniad_transforms(args)
     train_data, train_loader = make_train_loader(args, train_transform, item_list)
     model, trainable = build_model(args.encoder, device)
+    if args.init_checkpoint:
+        initial = torch.load(args.init_checkpoint, map_location="cpu")
+        for key in ("encoder", "preprocess", "crop_size", "image_size"):
+            fallback = "legacy" if key == "preprocess" else getattr(args, key)
+            if initial.get(key, fallback) != getattr(args, key):
+                raise ValueError(f"Initialization checkpoint has a different {key}; match its training configuration")
+        model.load_state_dict(initial["model"], strict=True)
+        logger.info(f"initialized weights from: {args.init_checkpoint}; optimizer starts fresh")
 
     optimizer = StableAdamW(
         [{"params": trainable.parameters()}],
@@ -340,6 +350,7 @@ def train(args, item_list, device, logger):
     logger.info(f"categories: {', '.join(item_list)}")
     logger.info(f"train images: {len(train_data)}")
     logger.info(f"encoder: {args.encoder}")
+    logger.info(f"loss: {args.loss}, local weight: {args.local_loss_weight}")
     logger.info(
         f"preprocess: {args.preprocess}, input: {args.crop_size}, "
         f"category_balanced: {args.category_balanced}, augmentation: {args.train_augment}"
@@ -349,13 +360,26 @@ def train(args, item_list, device, logger):
     it = 0
     while it < args.total_iters:
         model.train()
+        model.encoder.eval()
         loss_list = []
         for img, _ in train_loader:
             img = img.to(device, non_blocking=True)
             en, de = model(img)
 
-            p = min(args.hm_percent * it / args.hm_warmup_iters, args.hm_percent)
-            loss = global_cosine_hm_percent(en, de, p=p, factor=args.hm_factor)
+            progress = min(1.0, it / args.hm_warmup_iters)
+            p = args.hm_percent * progress
+            if args.loss == "local_hard":
+                from omniad_losses import local_hard_loss
+
+                # Avoid applying the legacy gradient hook to the local objective.
+                global_loss = torch.stack([
+                    (1 - F.cosine_similarity(a.detach().flatten(1), b.flatten(1), dim=1)).mean()
+                    for a, b in zip(en, de)
+                ]).mean()
+                local_loss = local_hard_loss(en, de, hard_fraction=1.0 - p)
+                loss = global_loss + args.local_loss_weight * local_loss
+            else:
+                loss = global_cosine_hm_percent(en, de, p=p, factor=args.hm_factor)
 
             optimizer.zero_grad()
             loss.backward()
@@ -373,6 +397,7 @@ def train(args, item_list, device, logger):
             if args.eval_every > 0 and it % args.eval_every == 0:
                 evaluate_dev(model, args, data_transform, gt_transform, item_list, device, logger)
                 model.train()
+                model.encoder.eval()
 
             if it >= args.total_iters:
                 break
@@ -390,6 +415,9 @@ def train(args, item_list, device, logger):
             "preprocess": args.preprocess,
             "gaussian_kernel_size": args.gaussian_kernel_size,
             "gaussian_sigma": args.gaussian_sigma,
+            "loss": args.loss,
+            "local_loss_weight": args.local_loss_weight,
+            "training_args": vars(args),
         },
         checkpoint_path,
     )
@@ -561,6 +589,9 @@ def parse_args():
     parser.add_argument("--categories", type=str, default=None, help="Comma-separated category list. Default: auto-discover.")
     parser.add_argument("--output_dir", type=str, default="./saved_results/omniad_dinomaly_uni")
     parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--init_checkpoint", default=None, help="Initialize training weights; optimizer and scheduler restart.")
+    parser.add_argument("--loss", choices=["legacy", "local_hard"], default="legacy")
+    parser.add_argument("--local_loss_weight", type=float, default=0.5)
     parser.add_argument("--encoder", type=str, default="dinov2reg_vit_base_14")
     parser.add_argument("--image_size", type=int, default=560, help="Legacy resize size; retained for old checkpoints.")
     parser.add_argument("--crop_size", type=int, default=560, help="Model input size. Use a multiple of the patch size.")
@@ -636,6 +667,14 @@ def get_feature_weights(args, category):
 
 
 def validate_args(args):
+    if args.batch_size <= 0 or args.total_iters <= 0 or args.hm_warmup_iters <= 0:
+        raise ValueError("Batch size, iterations and mining warmup must be positive")
+    if not 0 <= args.hm_percent < 1:
+        raise ValueError("--hm_percent must be in [0, 1)")
+    if not np.isfinite(args.local_loss_weight) or args.local_loss_weight < 0:
+        raise ValueError("--local_loss_weight must be finite and nonnegative")
+    if args.gaussian_sigma <= 0:
+        raise ValueError("--gaussian_sigma must be positive")
     if args.crop_size <= 0 or args.eval_mask_size <= 0:
         raise ValueError("--crop_size and --eval_mask_size must be positive")
     if args.gaussian_kernel_size <= 0 or args.gaussian_kernel_size % 2 == 0:
