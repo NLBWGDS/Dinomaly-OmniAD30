@@ -1,5 +1,11 @@
 # Experimental Boundary Refinement
 
+Status: rejected for the current baseline. The measured wafer2 pixel F1 changed
+from 0.410758 to 0.409475, and AUPRO from 0.801686 to 0.801615. Keep
+`predictions/hard3_routed`; this opt-in script is retained for reproducibility,
+not as the recommended inference path. See `NORMAL_REFERENCE.md` for the next
+separate experiment.
+
 This optional inference-only candidate targets broad anomaly halos around thin
 wafer2 scratches. It applies the grayscale guided filter from He et al., ECCV
 2010, using the original image as guidance, and blends it with the existing map.
