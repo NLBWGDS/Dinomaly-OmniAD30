@@ -11,10 +11,25 @@ import torch.nn.functional as F
 from PIL import Image
 
 from omniad_memory import descriptors, valid_patches, nearest_distance, calibration_scale, coreset_indices
-from predict_omniad_memory import run
+from predict_omniad_memory import run, configure_memory_geometry, memory_valid_mask
 
 
 class MemoryTests(unittest.TestCase):
+    def test_legacy_geometry_is_explicit_and_has_no_padding(self):
+        config = SimpleNamespace(preprocess='legacy', image_size=448, crop_size=392)
+        with self.assertRaises(ValueError):
+            configure_memory_geometry(config)
+        self.assertEqual(config.image_size, 448)
+        original = configure_memory_geometry(config, True)
+        self.assertEqual(original['image_size'], 448)
+        self.assertEqual(config.image_size, 392)
+        self.assertTrue(memory_valid_mask(config, 100, 300, 28, 28).all())
+        config = SimpleNamespace(preprocess='letterbox', image_size=56, crop_size=56)
+        configure_memory_geometry(config)
+        torch.testing.assert_close(memory_valid_mask(config, 28, 56, 4, 4), valid_patches(28, 56, 4, 4, 56))
+        with self.assertRaises(ValueError):
+            configure_memory_geometry(config, True)
+
     def test_context_preserves_detail_and_adds_neighbor_evidence(self):
         a = torch.zeros(1, 2, 3, 3)
         a[:, 1] = 1
@@ -198,6 +213,26 @@ class MemoryTests(unittest.TestCase):
             with (root / 'tiled_iron/scores.csv').open(newline='', encoding='utf-8') as handle:
                 tiled_rows = list(csv.DictReader(handle))
             self.assertEqual([r['score'] for r in tiled_rows], [r['score'] for r in rows])
+            # Reuse the same checkpoint mock through the explicit legacy route.
+            # Every patch is valid, even for a non-square source view.
+            def legacy_preprocess(config, checkpoint):
+                config.crop_size, config.image_size, config.preprocess = 16, 20, 'legacy'
+            fake.apply_checkpoint_preprocessing = legacy_preprocess
+            args.output_dir = str(root / 'legacy')
+            args.legacy_full_frame, args.reference_unselected = True, True
+            with patch.dict('sys.modules', {'dinomaly_omniad_uni': fake}):
+                run(args)
+            from export_omniad_routed import read_index
+            exported = read_index(root / 'legacy')
+            source_records = read_index(root / 'context')
+            for preserved in (category, 'wafer2'):
+                key = (preserved, 'defect/a.png')
+                self.assertEqual(exported[key][1].resolve(), source_records[key][1].resolve())
+                self.assertEqual(exported[key][0]['score'], source_records[key][0]['score'])
+            artifact = torch.load(root / 'legacy/normal_bank.pt', weights_only=True)
+            self.assertEqual(artifact['original_geometry']['image_size'], 20)
+            self.assertEqual(artifact['inference_geometry']['image_size'], 16)
+            self.assertTrue(np.isfinite(np.load(exported[('iron_lattice', 'defect/a.png')][1])).all())
 
 
 if __name__ == '__main__':

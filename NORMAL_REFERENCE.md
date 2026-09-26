@@ -212,3 +212,59 @@ and total runtime increase. This experimental exporter also decodes each crop
 from the source separately; its timings include that overhead. No deployment
 latency claim is made. Bank artifacts record crop configuration. Actual GPU
 accuracy/latency must be measured on the server; local tests use synthetic data.
+# Legacy full-frame retrieval experiment
+
+The latest accepted development candidate is `predictions/all30_detail_candidate`,
+not `all30_detail_gated`. Gating reduced mean Pixel F1 from 0.4337489939 to
+0.4328038708 and is not adopted. Mean AUPRO for the accepted candidate is
+0.7472751807 and Image F1 is 0.9071216954.
+
+The existing normal-reference branch now supports an explicit
+`--legacy_full_frame` option for the original unified checkpoint. Each view is
+resized to the checkpoint crop size without center cropping, so its borders
+remain visible. All feature patches are valid; unlike letterbox mode there is
+no padding. Original checkpoint weights and metadata on disk are unchanged.
+The manifest and bank artifact record original and inference geometries.
+This is an inference geometry change, not evidence of a trained-model gain.
+
+This experiment adds normal feature retrieval to ceramic_wafer, rather than
+reweighting the same pair of reconstruction maps again. Normal bank fitting,
+leave-one-original-image-out scale calibration and test inference use identical
+view geometry. All crops belonging to the calibration query image are excluded.
+No development masks enter bank fitting or inference. The coreset implementation
+and calibration are the existing repository algorithms, not a new PatchCore model.
+
+Run from the server project directory:
+
+```bash
+python -u predict_omniad_memory.py \
+  --predictions ./predictions/all30_detail_candidate \
+  --checkpoint ./saved_results/omniad_dinomaly_uni/omniad_dinomaly_uni.pth \
+  --data_path ../dataset/download/Omni-AD-30-release \
+  --output_dir ./predictions/all30_ceramic_memory \
+  --category ceramic_wafer \
+  --legacy_full_frame --require_all30 --reference_unselected \
+  --tile_grid 2 --tile_overlap 0.25 \
+  --feature_weights 0.5,0.5 --context_weight 0 \
+  --sampling coreset --bank_size 8192 --memory_weight 0.25
+
+python evaluate_omniad_export.py \
+  --predictions ./predictions/all30_ceramic_memory \
+  --output ./diagnostics/all30_ceramic_memory.json
+```
+
+This requires GPU inference and offline bank fitting, but no gradient training
+or additional dependencies. Keep all source prediction directories. The other
+29 categories and every image score are unchanged. `--require_all30` checks the
+complete dataset image inventory before fitting. Existing output directories
+are rejected. Default legacy behavior still rejects unapproved geometry changes;
+existing letterbox memory commands do not change.
+
+Compare full30 metrics with the accepted candidate, and ceramic Pixel F1 with
+0.0898267656 / AUPRO 0.6400206130. Keep this as a separate experiment until an
+actual improvement is measured. Normal retrieval can miss anomalous patches
+similar to normal ones; square resizing can distort aspect ratio; spatially
+unrestricted retrieval may confuse normal textures. There is no guarantee of
+better Pixel F1. It adds four views and patch retrieval per selected test image;
+latency must be measured before submission. Retain an independent holdout rather
+than repeatedly tuning parameters to the same development labels.

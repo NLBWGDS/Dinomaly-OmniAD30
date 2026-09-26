@@ -20,6 +20,29 @@ from PIL import Image
 from export_omniad_routed import read_index
 from omniad_memory import descriptors, valid_patches, nearest_distance, calibration_scale, coreset_indices
 from predict_omniad_tiled import tile_boxes, MapStitcher
+from evaluate_omniad_all30 import dataset_inventory, require_exact_keys
+
+
+def configure_memory_geometry(config, legacy_full_frame=False):
+    """Opt in to uncropped square views for legacy checkpoints; never change weights."""
+    original = dict(preprocess=config.preprocess, image_size=config.image_size, crop_size=config.crop_size)
+    if config.preprocess == 'legacy' and legacy_full_frame:
+        # Equal resize/crop sizes preserve every pixel of each view. Restoration
+        # then interpolates the whole score map, without a zero-filled border.
+        config.image_size = config.crop_size
+    elif config.preprocess != 'letterbox':
+        raise ValueError('Legacy checkpoint requires explicit --legacy_full_frame for normal retrieval')
+    elif legacy_full_frame:
+        raise ValueError('--legacy_full_frame is only for legacy checkpoints')
+    return original
+
+
+def memory_valid_mask(config, height, width, h, w):
+    if config.preprocess == 'legacy':
+        if config.image_size != config.crop_size:
+            raise ValueError('Legacy memory views must not center-crop')
+        return torch.ones(h*w, dtype=torch.bool)
+    return valid_patches(height, width, h, w, config.crop_size)
 
 
 def run(args):
@@ -48,6 +71,9 @@ def run(args):
     if sampling not in ('random', 'coreset') or multiplier < 1 or projection_dim < 1:
         raise ValueError('Invalid sampling mode, candidate multiplier or projection dimension')
     records = read_index(Path(args.predictions))
+    if getattr(args, 'require_all30', False):
+        _, expected = dataset_inventory(args.data_path)
+        require_exact_keys(records, expected, 'All30 source predictions')
     if not records or args.category not in {key[0] for key in records}:
         raise ValueError('Selected category is absent from source predictions')
     output = Path(args.output_dir)
@@ -74,8 +100,7 @@ def run(args):
     if checkpoint.get('categories') and args.category not in checkpoint['categories']:
         raise ValueError('Selected category was not included in this checkpoint training')
     apply_checkpoint_preprocessing(model_args, checkpoint)
-    if model_args.preprocess != 'letterbox':
-        raise ValueError('Normal reference inference currently requires a letterbox checkpoint')
+    original_geometry = configure_memory_geometry(model_args, getattr(args, 'legacy_full_frame', False))
     transform, _ = get_omniad_transforms(model_args)
 
     def views(path):
@@ -90,7 +115,7 @@ def run(args):
             batch = transform(image).unsqueeze(0).to(device)
         en, de = model(batch)
         h, w = en[0].shape[-2:]
-        valid = valid_patches(height, width, h, w, model_args.crop_size).to(device)
+        valid = memory_valid_mask(model_args, height, width, h, w).to(device)
         patches = descriptors(en, weights, context_weight, context_kernel,
                               valid.reshape(1, h, w))
         reconstruction = sum(weight / sum(weights) * (1 - F.cosine_similarity(a, b, dim=1))
@@ -146,6 +171,9 @@ def run(args):
                         arguments=vars(args), crop_size=model_args.crop_size,
                         sampling=sampling, candidate_count=candidate_count,
                         context_weight=context_weight, context_kernel=context_kernel,
+                        original_geometry=original_geometry,
+                        inference_geometry=dict(preprocess=model_args.preprocess,
+                                                image_size=model_args.image_size, crop_size=model_args.crop_size),
                         tile_grid=tile_grid, tile_overlap=tile_overlap), output / 'normal_bank.pt')
         print(f'Bank patches: {len(bank)}, normal-only scale: {scale:.6f}', flush=True)
         timings = []
@@ -182,11 +210,17 @@ def run(args):
                     timings.append((time.perf_counter() - start) * 1000)
                     print(f'{category}: {len(timings)} maps exported', flush=True)
                 else:
-                    shutil.copyfile(path, target)
+                    if getattr(args, 'reference_unselected', False):
+                        target = path
+                    else:
+                        shutil.copyfile(path, target)
                 writer.writerow([category, row['image_path'], row['score'], str(target.resolve())])
     manifest = dict(arguments=vars(args), bank_patches=len(bank), normal_only_scale=scale,
                     normal_images=[str(p.resolve()) for p in normal_paths],
-                    image_scores='Copied verbatim; unselected category maps copied byte-for-byte',
+                    image_scores='Copied verbatim; unselected maps unchanged (copied or referenced)',
+                    original_geometry=original_geometry,
+                    inference_geometry=dict(preprocess=model_args.preprocess,
+                                            image_size=model_args.image_size, crop_size=model_args.crop_size),
                     calibration='95th percentile ratio, leave-one-normal-image-out; no anomaly labels',
                     sampling=sampling, candidate_count=candidate_count,
                     descriptor_dimension=bank.shape[1], context_weight=context_weight,
@@ -225,6 +259,11 @@ if __name__ == '__main__':
     parser.add_argument('--tile_grid', type=int, default=1,
                         help='Use identical overlapping crops for normal fitting and test retrieval.')
     parser.add_argument('--tile_overlap', type=float, default=0.25)
+    parser.add_argument('--legacy_full_frame', action='store_true',
+                        help='Explicitly resize each legacy-model view to crop_size without cropping its borders.')
+    parser.add_argument('--require_all30', action='store_true', help='Validate full dataset coverage before inference.')
+    parser.add_argument('--reference_unselected', action='store_true',
+                        help='Reference unchanged source maps instead of copying them; preserve source directories.')
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--device', default='cuda:0')
     run(parser.parse_args())
