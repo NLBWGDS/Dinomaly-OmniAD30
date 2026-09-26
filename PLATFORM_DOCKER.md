@@ -1,147 +1,183 @@
 # AI training platform Docker package
 
-This image supports both platform jobs. `train` consumes normal images and emits
-`/output/output.bin`; `infer` loads that file and emits visualization JSON, metric
-maps and the mandatory reasoning log. Dataset images are never copied into the
-image. The public official DINOv2 register ViT-B/14 backbone is downloaded during
-the Docker build, so training and inference do not require outbound network access.
+The image contains one Dinomaly model path for both platform training and inference.
+Training reads normal images from `/input/original/input_data/images/train` and writes
+`/output/output.bin`. Inference reads `/input/param.json`, writes one visualization
+JSON per image under `/output`, writes metric files below `/input/pred`, and records
+`/output/reasoning.log`.
 
-## Build and smoke checks
+The image is based on PyTorch 2.3.1, CUDA 11.8 and cuDNN 8. The public DINOv2
+register ViT-B/14 backbone is downloaded during `docker build`, so platform jobs do
+not require outbound network access.
 
-Build on an x86-64 Linux machine with Docker 28.1 (or a compatible recent Docker):
+## Build
+
+Build and save the image on x86-64 Linux:
 
 ```bash
 docker build --pull -t omniad_dinomaly:1.0.0 .
 docker image inspect omniad_dinomaly:1.0.0
+docker save -o omniad_dinomaly_1.0.0.tar omniad_dinomaly:1.0.0
+zip -1 omniad_dinomaly_1.0.0.zip omniad_dinomaly_1.0.0.tar
+unzip -t omniad_dinomaly_1.0.0.zip
 ```
 
-The base image is PyTorch 2.3.1 with CUDA 11.8 and cuDNN 8 on Ubuntu. The target
-RTX 4090 driver 570 is backward compatible with this CUDA runtime. The trained
-state dictionary is compatible with the project's PyTorch 2.4.1 development runs.
-The platform must use the NVIDIA runtime for GPU jobs.
+The platform upload limit is 5 GB. Check the final ZIP before upload. Dataset files,
+development predictions, diagnostics and local checkpoints are excluded by
+`.dockerignore`.
 
-Before upload, exercise the exact mounts. Training input must contain:
+## Training protocol
+
+Expected input:
 
 ```text
-train-input/original/input_data/
+/input/original/input_data/
   param.json
   images/train/
     000.png
     ...
 ```
 
-```bash
-docker run --rm --runtime=nvidia --shm-size=16g \
-  -e NVIDIA_VISIBLE_DEVICES=0 \
-  -v /dev/shm:/dev/shm \
-  -v "$PWD/train-input:/input" \
-  -v "$PWD/train-output:/output" \
-  omniad_dinomaly:1.0.0 train
-
-test -s train-output/output.bin
-grep finish train-output/state.txt
-```
-
-Inference input example:
+Supported training parameters are shown in `platform_examples/train_param.json`.
+Only OK/normal images in `images/train` are used. The fixed outputs are:
 
 ```text
-infer-input/
-  param.json
-  models/output.bin
-  imgs/000.png
-  pred/gt.json              # supplied by the platform; never overwritten
+/output/output.bin
+/output/state.txt
 ```
 
-```bash
-docker run --rm --runtime=nvidia \
-  -e NVIDIA_VISIBLE_DEVICES=0 \
-  -v /tmp/:/tmp/ \
-  -v "$PWD/infer-input:/input" \
-  -v "$PWD/infer-output:/output" \
-  omniad_dinomaly:1.0.0 infer
+`state.txt` is UTF-8. A progress line follows the platform parser format exactly:
 
-test -s infer-input/pred/pred.json
-test -s infer-input/pred/pred_maps/test/000.npy
-grep "reasoning close success" infer-output/reasoning.log
+```text
+Epoch(train) [14][7/7] Iter: 98/140 lr:0.000094  eta:0:00:08  time:0.131060  memory:1975  loss:24.520100
 ```
 
-`platform_examples/` contains parameter templates. `imagePath` may name one image
-or a directory below `/input`. Flat platform output requires unique file names and
-stems. The adapter rejects paths escaping `/input`, encrypted models, duplicate
-names, unsupported algorithm subtypes, invalid values and GPU requests when CUDA
-is unavailable. Errors are written in the required log format before a nonzero exit.
+The word `finish` is written only after `output.bin` has been exported successfully.
 
-Metric anomaly maps are float32, original image size, finite and clipped to [0,1].
-They are not normalized from each test image. `MinScore`, `pixelThreshold` and
-`minArea` affect only `/output/<stem>.json`; they do not alter metric maps or image
-scores. `/input/pred/gt.json` is left untouched. Image-level score is the mean of
-the highest 1% model-map pixels. Each image's end-to-end and SDK times are logged.
-
-## Platform command templates
-
-Use the platform's own variable syntax exactly as configured by its administrator.
-Do not put literal host paths or GPU IDs into the image.
-
-Training command template:
+Use this platform command template:
 
 ```bash
-docker run --runtime=nvidia --rm --name ${containerName} --shm-size=16g \
-  -e NVIDIA_VISIBLE_DEVICES=${gpuNumber} \
+docker run \
+  --cap-add=ALL \
+  --gpus '"device=${gpuNumber}"' \
+  --name=${containerName} \
+  --security-opt seccomp=unconfined \
+  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
   -v /dev/shm:/dev/shm \
   -v ${inputDir}:/input \
   -v ${outputDir}:/output \
-  ${imageVersion} train
+  --entrypoint /bin/bash \
+  --rm ${imageVersion} \
+  -c "cd /opt/omniad && sh train.sh /input/ /output/"
 ```
 
-Inference command template:
+## Inference protocol
+
+Expected input:
+
+```text
+/input/
+  param.json
+  model/output.bin
+  imgs/000.png
+  pred/gt.json
+```
+
+The parameter schema is shown in `platform_examples/infer_param.json`. Required
+values are `algorithmType=103`, `algorithmSubType=0`, `modelType`, `modelPath`,
+`imagePath`, and `platType` (`1` for CPU or `2` for GPU). Paths such as
+`/model/output.bin` and `/imgs/` are resolved inside the `/input` mount. Custom
+parameters including `MinScore`, `pixelThreshold`, and `minArea` are read directly
+from `cnnParam`; `cnnParam.extendParamMap` is also accepted for compatibility.
+
+For every input image, the adapter writes `/output/<image-stem>.json`. A normal
+result is `[]`. Each detected polygon uses this schema:
+
+```json
+[
+  {
+    "category_Name": "1",
+    "score": 0.9691603,
+    "id": 1,
+    "segmentation": [[1019, 247, 1020, 248, 1020, 250]],
+    "type": "polygon"
+  }
+]
+```
+
+Metric outputs are written to the mandatory locations:
+
+```text
+/input/pred/pred.json
+/input/pred/gt.json
+/input/pred/pred_maps/test/000.npy
+```
+
+The `pred.json` key is `test/000.png`; `anomaly_map` is
+`pred_maps/test/000.npy`. Maps are float32 at original image size, finite, and
+clipped to `[0, 1]`. Existing `gt.json` is never overwritten.
+
+`/output/reasoning.log` contains the required records without spaces around `=`:
+
+```text
+reasoning start
+reasoning imageName=000.png,sequence=1,algRunTime=153.000000,sdkRunTime=140.000000
+reasoning close success
+```
+
+Failures are recorded as:
+
+```text
+reasoning error, code=0x80100000, message=ValueError: error details
+```
+
+Use this platform command template:
 
 ```bash
-docker run --runtime=nvidia --rm --name ${taskName} \
-  -e NVIDIA_VISIBLE_DEVICES=${visibleDevice} \
+docker run --runtime=nvidia --cap-add=ALL \
+  --env NVIDIA_VISIBLE_DEVICES=${visibleDevice} \
+  --name=${taskName} \
   -v /tmp/:/tmp/ \
   -v ${inputPath}:/input \
   -v ${outputPath}:/output \
-  ${tagName} infer
+  --rm ${tagName} /bin/bash \
+  -c 'cd /opt/omniad && sh start.sh /input/ /output/'
 ```
 
-Suggested management values: third-party image, algorithm subtype `103` / unsupervised
-segmentation, GPU supported, custom parameters supported, non-resident image. Use
-the exact image name/version required by the account's naming convention.
+Suggested management settings: third-party image, algorithm type `103` (unsupervised
+segmentation), GPU supported, custom parameters supported, and non-resident image.
+The image intentionally has no `ENTRYPOINT`, because the platform appends
+`/bin/bash -c ...` to the image command.
 
-## Upload archive
+## Local smoke checks
 
-The upload UI requests a ZIP file with a 5 GB maximum. Save the Docker image, ZIP
-the resulting tar, and verify it can be loaded before uploading:
+Run training with the same entry command used by the platform:
 
 ```bash
-docker save -o omniad_dinomaly_1.0.0.tar omniad_dinomaly:1.0.0
-zip -1 omniad_dinomaly_1.0.0.zip omniad_dinomaly_1.0.0.tar
-ls -lh omniad_dinomaly_1.0.0.zip
-
-unzip -t omniad_dinomaly_1.0.0.zip
-unzip -p omniad_dinomaly_1.0.0.zip omniad_dinomaly_1.0.0.tar | docker load
+docker run --rm --gpus '"device=0"' --security-opt seccomp=unconfined \
+  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+  -v /dev/shm:/dev/shm \
+  -v "$PWD/train-input:/input" -v "$PWD/train-output:/output" \
+  --entrypoint /bin/bash omniad_dinomaly:1.0.0 \
+  -c 'cd /opt/omniad && sh train.sh /input/ /output/'
+test -s train-output/output.bin
+tail -n 1 train-output/state.txt | grep '^finish'
 ```
 
-Do not include the dataset, development predictions, diagnostics, or trained local
-checkpoints in the build context. `.dockerignore` excludes those paths and test
-files. If the ZIP exceeds 5 GB, stop rather than splitting it: inspect Docker layers
-and use the platform's documented base-image mechanism if available.
+Run inference:
 
-## Training semantics and limits
+```bash
+docker run --rm --runtime=nvidia --cap-add=ALL \
+  -e NVIDIA_VISIBLE_DEVICES=0 -v /tmp/:/tmp/ \
+  -v "$PWD/infer-input:/input" -v "$PWD/infer-output:/output" \
+  omniad_dinomaly:1.0.0 /bin/bash \
+  -c 'cd /opt/omniad && sh start.sh /input/ /output/'
+test -s infer-input/pred/pred.json
+test -s infer-input/pred/pred_maps/test/000.npy
+tail -n 1 infer-output/reasoning.log | grep 'reasoning close success'
+```
 
-Only `/input/original/input_data/images/train` is used for optimization. Files are
-staged under `/tmp` into the repository's normal-only layout. With `epochs`, total
-optimizer iterations are `epochs * ceil(normal_images / batch_size)`; an explicit
-`total_iters` overrides this. Resolution must be divisible by the DINOv2 patch size
-14. The log always includes `Epoch (train)`, `Iter`, `lr`, `eta`, `time`, `memory`,
-`loss`, and the terminal `finish` marker. Model export is atomic and fixed to
-`/output/output.bin`.
-
-This platform package is a clean single-model Dinomaly training/inference path.
-The development-only routed ensembles, category-specific memory banks, full-coverage
-multi-view experiments and label-guided result selection are intentionally absent:
-they are not self-contained in `output.bin`, and multi-view retrieval threatens the
-100 ms inference limit. Consequently, the Docker package is protocol-complete but
-does not automatically reproduce the best routed development score. Measure RTX4090
-latency on the actual platform; the competition gives zero inference-time points
-above 100 ms and requires peak VRAM below 24 GB.
+The package adapter is protocol-complete, but the image size, RTX 4090 runtime,
+peak VRAM, and per-image latency must still be verified by building and running the
+image on a Linux NVIDIA host. Encrypted model files are not supported; leave the
+optional `modelPassword` field empty.

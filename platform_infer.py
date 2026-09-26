@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from platform_io import (atomic_json, bounded_number, contained_path, discover_images,
-                         get_parameter, load_json)
+from platform_io import (atomic_json, bounded_number, discover_images,
+                         get_parameter, load_json, platform_input_path)
 
 
 class ReasoningLog:
@@ -73,7 +73,7 @@ class DinomalyPredictor:
         return float(score), restored.float().cpu().numpy(), sdk_ms
 
 
-def visual_objects(score, anomaly_map, min_score, pixel_threshold, min_area):
+def visual_objects(score, anomaly_map, min_score, pixel_threshold, min_area, category_name='1'):
     if score < min_score:
         return []
     import cv2
@@ -88,9 +88,9 @@ def visual_objects(score, anomaly_map, min_score, pixel_threshold, min_area):
         polygon = cv2.approxPolyDP(contour, epsilon, True).reshape(-1, 2)
         if len(polygon) < 3:
             continue
-        points = [{'x': int(x), 'y': int(y)} for x, y in polygon]
-        objects.append({'score': float(score), 'id': len(objects)+1, 'labelName': 'NG',
-                        'segmentation': [[int(x), int(y)] for x, y in polygon], 'points': points})
+        flat_polygon = [int(value) for point in polygon for value in point]
+        objects.append({'category_Name': str(category_name), 'score': float(score),
+                        'id': len(objects)+1, 'segmentation': [flat_polygon], 'type': 'polygon'})
     return objects
 
 
@@ -101,9 +101,15 @@ def run(args, predictor_factory=DinomalyPredictor):
     log.write('reasoning start')
     try:
         params = load_json(input_root / 'param.json')
-        subtype = get_parameter(params, ('算法子类型', 'algorithmSubType', 'algorithmType'))
-        if subtype is not None and str(subtype) not in {'103', '无监督分割'}:
-            raise ValueError(f'unsupported algorithm subtype: {subtype}')
+        algorithm_type = get_parameter(params, ('algorithmType', '算法类型'))
+        if str(algorithm_type) not in {'103', '无监督分割'}:
+            raise ValueError(f'algorithmType must be 103 (unsupervised segmentation), got {algorithm_type}')
+        subtype = get_parameter(params, ('algorithmSubType', '算法子类型'), 0)
+        if str(subtype) != '0':
+            raise ValueError(f'algorithmSubType must be 0, got {subtype}')
+        model_type = get_parameter(params, ('modelType', '模型类型'))
+        if str(model_type) not in {'1', '4'}:
+            raise ValueError(f'modelType must be 1 or 4, got {model_type}')
         password = get_parameter(params, ('模型加密密码', 'modelPassword', 'password'))
         if password not in (None, ''):
             raise ValueError('encrypted model files are not supported by this image')
@@ -111,12 +117,12 @@ def run(args, predictor_factory=DinomalyPredictor):
         image_raw = get_parameter(params, ('imagePath', '图片路径', 'image_path'))
         if model_raw is None or image_raw is None:
             raise ValueError('param.json requires modelPath/模型路径 and imagePath')
-        model_path = contained_path(model_raw, input_root, 'modelPath')
-        image_path = contained_path(image_raw, input_root, 'imagePath')
+        model_path = platform_input_path(model_raw, input_root, 'modelPath')
+        image_path = platform_input_path(image_raw, input_root, 'imagePath')
         if not model_path.is_file():
             raise ValueError('modelPath must be a file')
         images = discover_images(image_path)
-        platform = str(get_parameter(params, ('platType', '推理平台类型'), '2'))
+        platform = str(get_parameter(params, ('platType', 'platTyppe', '推理平台类型'), '2'))
         if platform not in {'1', '2'}:
             raise ValueError('platType must be 1 (CPU) or 2 (GPU)')
         device = 'cpu' if platform == '1' else 'cuda:0'
@@ -127,6 +133,7 @@ def run(args, predictor_factory=DinomalyPredictor):
         min_score = bounded_number(params, ('MinScore', 'minScore', 'confidence'), .1, float, 0., 1.)
         pixel_threshold = bounded_number(params, ('pixelThreshold', '像素阈值'), .12, float, 0., 1.)
         min_area = bounded_number(params, ('minArea', '最小面积'), 4, int, 0, 1000000000)
+        category_name = get_parameter(params, ('category_Name', 'categoryName', 'labelName'), '1')
         predictor = predictor_factory(model_path, device)
         pred_root = input_root / 'pred'
         map_root = pred_root / 'pred_maps' / 'test'
@@ -152,14 +159,16 @@ def run(args, predictor_factory=DinomalyPredictor):
             key = f'test/{image.name}'
             predictions[key] = {'anomaly_score': bounded_score, 'anomaly_map': relative_map}
             atomic_json(output_root / f'{image.stem}.json',
-                        visual_objects(bounded_score, normalized, min_score, pixel_threshold, min_area))
+                        visual_objects(bounded_score, normalized, min_score, pixel_threshold,
+                                       min_area, category_name))
             alg_ms = (time.perf_counter() - started) * 1000
-            log.write(f'reasoning imageName = {image.name}, sequence = {sequence}, '
-                      f'algRunTime = {alg_ms:.3f}, sdkRunTime = {sdk_ms:.3f}')
+            log.write(f'reasoning imageName={image.name},sequence={sequence},'
+                      f'algRunTime={alg_ms:.6f},sdkRunTime={sdk_ms:.6f}')
         atomic_json(pred_root / 'pred.json', predictions)
         log.write('reasoning close success')
     except Exception as exc:
-        log.write(f'reasoning error, code = 500, message = {type(exc).__name__}: {exc}')
+        message = f'{type(exc).__name__}: {exc}'.replace('\r', ' ').replace('\n', ' ')
+        log.write(f'reasoning error, code=0x80100000, message={message}')
         raise
     finally:
         log.close()

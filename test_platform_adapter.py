@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image
 
 from platform_infer import run as run_inference, visual_objects
-from platform_io import contained_path, get_parameter
+from platform_io import contained_path, get_parameter, platform_input_path
 from platform_train import learning_rate, run as run_training, stage_training_data
 
 
@@ -21,6 +21,11 @@ class PlatformAdapterTests(unittest.TestCase):
             root = Path(tmp)
             (root / 'inner.bin').touch()
             self.assertEqual(contained_path('inner.bin', root, 'model'), (root / 'inner.bin').resolve())
+            model = root / 'model/output.bin'
+            model.parent.mkdir()
+            model.touch()
+            self.assertEqual(platform_input_path('/model/output.bin', root, 'model'), model.resolve())
+            self.assertEqual(platform_input_path('/input/model/output.bin', root, 'model'), model.resolve())
             with self.assertRaises(ValueError):
                 contained_path('../escape.bin', root, 'model', must_exist=False)
 
@@ -55,9 +60,10 @@ class PlatformAdapterTests(unittest.TestCase):
             (input_root / 'pred').mkdir()
             gt = input_root / 'pred/gt.json'
             gt.write_text('{"sentinel": true}', encoding='utf-8')
-            params = {'算法子类型': 103, '模型类型': 'Dinomaly', '模型路径': '/input/models/output.bin',
+            params = {'algorithmType': 103, 'algorithmSubType': 0, 'modelType': 1,
+                      'modelPath': '/input/models/output.bin',
                       'imagePath': '/input/imgs', 'platType': 1,
-                      'cnnParam': {'extendParamMap': {'MinScore': .1, 'pixelThreshold': .2}}}
+                      'cnnParam': {'MinScore': .1, 'pixelThreshold': .2}}
             (input_root / 'param.json').write_text(json.dumps(params, ensure_ascii=False), encoding='utf-8')
 
             class FakePredictor:
@@ -89,7 +95,8 @@ class PlatformAdapterTests(unittest.TestCase):
             self.assertEqual(gt.read_text(encoding='utf-8'), '{"sentinel": true}')
             log = (output_root / 'reasoning.log').read_text(encoding='utf-8')
             self.assertIn('reasoning start', log)
-            self.assertIn('reasoning imageName = sample.png, sequence = 1', log)
+            self.assertIn('reasoning imageName=sample.png,sequence=1', log)
+            self.assertRegex(log, r'algRunTime=\d+\.\d+,sdkRunTime=\d+\.\d+')
             self.assertTrue(log.rstrip().endswith('reasoning close success'))
 
     def test_training_protocol_exports_fixed_model_name_and_log(self):
@@ -123,12 +130,28 @@ class PlatformAdapterTests(unittest.TestCase):
                 run_training(args)
             self.assertEqual((output_root / 'output.bin').read_bytes(), b'checkpoint')
             state = (output_root / 'state.txt').read_text(encoding='utf-8')
-            for keyword in ('Epoch (train)', 'Iter', 'lr', 'eta', 'time', 'memory', 'loss', 'finish'):
+            for keyword in ('Epoch(train)', 'Iter:', 'lr:', 'eta:', 'time:', 'memory:', 'loss:', 'finish'):
                 self.assertIn(keyword, state)
-            self.assertIn('memory 321', state)
+            self.assertIn('Epoch(train) [1][1/2] Iter: 1/2', state)
+            self.assertIn('memory:321', state)
+            self.assertNotIn('finish', '\n'.join(state.splitlines()[:-1]))
+            self.assertTrue(state.rstrip().endswith('finish omniad training'))
 
     def test_visual_empty_below_image_threshold(self):
         self.assertEqual(visual_objects(.09, np.ones((5, 5), np.float32), .1, .2, 0), [])
+
+    def test_visual_schema_matches_unsupervised_polygon(self):
+        contour = np.array([[[1, 2]], [[8, 2]], [[8, 9]], [[1, 9]]], np.int32)
+        fake_cv2 = SimpleNamespace(
+            RETR_EXTERNAL=0, CHAIN_APPROX_SIMPLE=0,
+            findContours=lambda binary, mode, method: ([contour], None),
+            contourArea=lambda value: 49., arcLength=lambda value, closed: 28.,
+            approxPolyDP=lambda value, epsilon, closed: value)
+        with patch.dict('sys.modules', {'cv2': fake_cv2}):
+            result = visual_objects(.8, np.ones((12, 16), np.float32), .1, .2, 4, '1')
+        self.assertEqual(set(result[0]), {'category_Name', 'score', 'id', 'segmentation', 'type'})
+        self.assertEqual(result[0]['type'], 'polygon')
+        self.assertEqual(result[0]['segmentation'], [[1, 2, 8, 2, 8, 9, 1, 9]])
 
 
 if __name__ == '__main__':

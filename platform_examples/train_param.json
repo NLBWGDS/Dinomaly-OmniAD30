@@ -1,13 +1,9 @@
 {
-  "cnnParam": {
-    "extendParamMap": {
-      "epochs": 100,
-      "batch_size": 4,
-      "num_workers": 4,
-      "resolution": 560,
-      "lr": 0.002,
-      "final_lr": 0.0002,
-      "train_augment": true
-    }
-  }
+  "epochs": 100,
+  "batch_size": 4,
+  "num_workers": 4,
+  "resolution": 560,
+  "lr": 0.002,
+  "final_lr": 0.0002,
+  "train_augment": true
 }

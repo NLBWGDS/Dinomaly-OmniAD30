@@ -1,6 +1,7 @@
 """Competition training entry: /input normal images -> /output/output.bin."""
 
 import argparse
+import datetime
 import math
 import os
 import re
@@ -92,6 +93,7 @@ def run(args):
         final_lr = bounded_number(params, ('final_lr', 'finalLr'), lr/10, float, 0., lr)
         augment = parse_bool(get_parameter(params, ('train_augment', 'trainAugment', '数据增强'), True), 'train_augment')
         log_every = max(1, min(100, total_iters // 100 or 1))
+        batches_per_epoch = max(1, math.ceil(len(images) / batch))
         runtime = Path(args.runtime_dir)
         if runtime.exists():
             shutil.rmtree(runtime)
@@ -105,12 +107,12 @@ def run(args):
                    '--final_lr', str(final_lr), '--warmup_iters', str(warmup),
                    '--hm_warmup_iters', str(mining_warmup), '--log_every', str(log_every), '--eval_every', '0',
                    '--device', args.device, '--train_augment' if augment else '--no-train_augment']
-        state.write(f'Epoch (train) [0/{epochs}] Iter [0/{total_iters}] lr {lr:.8g} '
-                    f'eta unknown time 0.000 memory 0 loss 0.000000')
+        state.write('Start Training')
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding='utf-8', errors='replace', bufsize=1)
         assert process.stdout is not None
         last = time.perf_counter()
+        last_step = 0
         for line in process.stdout:
             line = line.rstrip()
             print(line, flush=True)
@@ -121,11 +123,17 @@ def run(args):
                 elapsed = now - started
                 eta = elapsed / max(1, step) * (total-step)
                 memory = gpu_memory_mb()
-                epoch = min(epochs, math.ceil(step / max(1, total/epochs)))
-                state.write(f'Epoch (train) [{epoch}/{epochs}] Iter [{step}/{total}] '
-                            f'lr {learning_rate(step, total, lr, final_lr, warmup):.8g} '
-                            f'eta {eta:.1f} time {now-last:.3f} memory {memory} loss {loss:.6f}')
+                epoch = (step-1) // batches_per_epoch + 1
+                batch_index = (step-1) % batches_per_epoch + 1
+                iteration_time = (now-last) / max(1, step-last_step)
+                eta_text = str(datetime.timedelta(seconds=max(0, round(eta))))
+                state.write(f'Epoch(train) [{epoch}][{batch_index}/{batches_per_epoch}] '
+                            f'Iter: {step}/{total} '
+                            f'lr:{learning_rate(step, total, lr, final_lr, warmup):.8g}  '
+                            f'eta:{eta_text}  time:{iteration_time:.6f}  '
+                            f'memory:{memory}  loss:{loss:.6f}')
                 last = now
+                last_step = step
         code = process.wait()
         if code:
             raise RuntimeError(f'training process exited with code {code}')
@@ -135,12 +143,9 @@ def run(args):
         temporary = output_root / 'output.bin.tmp'
         shutil.copyfile(checkpoint, temporary)
         os.replace(temporary, output_root / 'output.bin')
-        state.write(f'Epoch (train) [{epochs}/{epochs}] Iter [{total_iters}/{total_iters}] '
-                    f'lr {final_lr:.8g} eta 0 time {time.perf_counter()-started:.3f} '
-                    f'memory 0 loss 0 finish')
+        state.write('finish omniad training')
     except Exception as exc:
-        state.write(f'Epoch (train) [0/0] Iter [0/0] lr 0 eta 0 time '
-                    f'{time.perf_counter()-started:.3f} memory 0 loss nan error {type(exc).__name__}: {exc}')
+        state.write(f'error {type(exc).__name__}: {exc}')
         raise
     finally:
         state.close()

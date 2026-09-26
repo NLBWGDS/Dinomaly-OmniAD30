@@ -1,14 +1,13 @@
 {
-  "算法子类型": 103,
-  "模型类型": "Dinomaly-DINOv2",
-  "模型路径": "/input/models/output.bin",
-  "imagePath": "/input/imgs",
+  "algorithmType": 103,
+  "algorithmSubType": 0,
+  "modelType": 1,
+  "modelPath": "/model/output.bin",
+  "imagePath": "/imgs/",
   "platType": 2,
   "cnnParam": {
-    "extendParamMap": {
-      "MinScore": 0.1,
-      "pixelThreshold": 0.12,
-      "minArea": 4
-    }
+    "MinScore": 0.1,
+    "pixelThreshold": 0.12,
+    "minArea": 4
   }
 }

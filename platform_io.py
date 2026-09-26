@@ -80,6 +80,24 @@ def contained_path(raw, root, name, must_exist=True):
     return candidate
 
 
+def platform_input_path(raw, root, name, must_exist=True):
+    """Resolve platform virtual /model and /imgs paths below the /input mount."""
+    root = Path(root).resolve()
+    direct = Path(str(raw))
+    if direct.is_absolute():
+        resolved = direct.resolve()
+        if resolved == root or root in resolved.parents:
+            return contained_path(resolved, root, name, must_exist)
+    portable = str(raw).replace('\\', '/')
+    if portable == '/input':
+        portable = ''
+    elif portable.startswith('/input/'):
+        portable = portable[len('/input/'):]
+    else:
+        portable = portable.lstrip('/')
+    return contained_path(portable, root, name, must_exist)
+
+
 def discover_images(path):
     path = Path(path)
     if path.is_file():
