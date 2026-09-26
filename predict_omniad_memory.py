@@ -19,6 +19,7 @@ from PIL import Image
 
 from export_omniad_routed import read_index
 from omniad_memory import descriptors, valid_patches, nearest_distance, calibration_scale, coreset_indices
+from predict_omniad_tiled import tile_boxes, MapStitcher
 
 
 def run(args):
@@ -37,6 +38,9 @@ def run(args):
     projection_dim = getattr(args, 'projection_dim', 64)
     context_weight = getattr(args, 'context_weight', 0.)
     context_kernel = getattr(args, 'context_kernel', 3)
+    tile_grid = getattr(args, 'tile_grid', 1)
+    tile_overlap = getattr(args, 'tile_overlap', .25)
+    tile_boxes(100, 100, tile_grid, tile_overlap)
     if not np.isfinite(context_weight) or not 0 <= context_weight <= 1:
         raise ValueError('context_weight must be in [0,1]')
     if context_kernel < 1 or context_kernel % 2 != 1:
@@ -74,9 +78,14 @@ def run(args):
         raise ValueError('Normal reference inference currently requires a letterbox checkpoint')
     transform, _ = get_omniad_transforms(model_args)
 
-    def extract(path):
+    def views(path):
         with Image.open(path) as image:
-            image = image.convert('RGB')
+            width, height = image.size
+        return width, height, tile_boxes(width, height, tile_grid, tile_overlap)
+
+    def extract(path, box):
+        with Image.open(path) as image:
+            image = image.convert('RGB').crop(box)
             width, height = image.size
             batch = transform(image).unsqueeze(0).to(device)
         en, de = model(batch)
@@ -95,8 +104,13 @@ def run(args):
     with torch.inference_mode():
         chunks, owner_chunks = [], []
         for i, path in enumerate(normal_paths):
-            patches, _, valid, _ = extract(path)
-            patches = patches[valid].cpu()
+            _, _, boxes = views(path)
+            local_patches = []
+            for box in boxes:
+                patches, _, valid, _ = extract(path, box)
+                local_patches.append(patches[valid].cpu())
+            patches = torch.cat(local_patches)
+            del local_patches
             indices = torch.randperm(len(patches), generator=generator)[:candidate_quota]
             chunks.append(patches[indices])
             owner_chunks.append(torch.full((len(indices),), i, dtype=torch.long))
@@ -118,18 +132,21 @@ def run(args):
         selection_seconds = time.perf_counter() - selection_start
         normal_rec, normal_mem = [], []
         for i, path in enumerate(normal_paths):
-            patches, reconstruction, valid, _ = extract(path)
-            # Exclude ALL patches of this image, not merely an identical patch.
-            distances = nearest_distance(patches[valid], bank, args.query_chunk, owners, i)
-            normal_rec.append(reconstruction[valid].cpu())
-            normal_mem.append(distances.cpu())
+            _, _, boxes = views(path)
+            for box in boxes:
+                patches, reconstruction, valid, _ = extract(path, box)
+                # Exclude the original image, including every overlapping crop.
+                distances = nearest_distance(patches[valid], bank, args.query_chunk, owners, i)
+                normal_rec.append(reconstruction[valid].cpu())
+                normal_mem.append(distances.cpu())
             print(f'Normal calibration: {i+1}/{len(normal_paths)}', flush=True)
         scale = calibration_scale(torch.cat(normal_rec), torch.cat(normal_mem))
         torch.save(dict(bank=bank.cpu(), owners=owners.cpu(), scale=scale,
                         normal_paths=[str(p.resolve()) for p in normal_paths],
                         arguments=vars(args), crop_size=model_args.crop_size,
                         sampling=sampling, candidate_count=candidate_count,
-                        context_weight=context_weight, context_kernel=context_kernel), output / 'normal_bank.pt')
+                        context_weight=context_weight, context_kernel=context_kernel,
+                        tile_grid=tile_grid, tile_overlap=tile_overlap), output / 'normal_bank.pt')
         print(f'Bank patches: {len(bank)}, normal-only scale: {scale:.6f}', flush=True)
         timings = []
         with (output / 'scores.csv').open('w', newline='', encoding='utf-8') as handle:
@@ -142,11 +159,19 @@ def run(args):
                     if device.type == 'cuda':
                         torch.cuda.synchronize()
                     start = time.perf_counter()
-                    patches, _, _, (height, width, h, w) = extract(data / category / 'test' / relative)
-                    distance = nearest_distance(patches, bank, args.query_chunk).reshape(1, 1, h, w)
-                    distance = F.interpolate(distance, size=(model_args.crop_size, model_args.crop_size),
-                                             mode='bilinear', align_corners=False)
-                    memory = restore_anomaly_map(distance, height, width, model_args)[0, 0].cpu().numpy() * scale
+                    image_path = data / category / 'test' / relative
+                    width, height, boxes = views(image_path)
+                    stitch = MapStitcher(width, height) if len(boxes) > 1 else None
+                    for box in boxes:
+                        patches, _, _, (crop_h, crop_w, h, w) = extract(image_path, box)
+                        distance = nearest_distance(patches, bank, args.query_chunk).reshape(1, 1, h, w)
+                        distance = F.interpolate(distance, size=(model_args.crop_size, model_args.crop_size),
+                                                 mode='bilinear', align_corners=False)
+                        memory = restore_anomaly_map(distance, crop_h, crop_w, model_args)[0, 0].cpu().numpy() * scale
+                        if stitch is not None:
+                            stitch.add(box, memory)
+                    if stitch is not None:
+                        memory = stitch.finish()
                     baseline = np.load(path, allow_pickle=False)
                     if baseline.shape != memory.shape or not np.isfinite(baseline).all():
                         raise ValueError(f'Invalid original-resolution source map: {path}')
@@ -166,6 +191,9 @@ def run(args):
                     sampling=sampling, candidate_count=candidate_count,
                     descriptor_dimension=bank.shape[1], context_weight=context_weight,
                     context_kernel=context_kernel,
+                    tile_grid=tile_grid, tile_overlap=tile_overlap,
+                    tile_note='Same crop geometry for normal bank, calibration and inference. '
+                              'Calibration excludes all crops of the query source image.',
                     selection_seconds=selection_seconds,
                     sampling_note='Random per-image pool; optional projected farthest-first coreset. '
                                   'Original full-dimensional features retained for retrieval; not full PatchCore.',
@@ -194,6 +222,9 @@ if __name__ == '__main__':
     parser.add_argument('--context_kernel', type=int, default=3,
                         help='Odd neighborhood size in feature patches, not original-image pixels.')
     parser.add_argument('--query_chunk', type=int, default=256)
+    parser.add_argument('--tile_grid', type=int, default=1,
+                        help='Use identical overlapping crops for normal fitting and test retrieval.')
+    parser.add_argument('--tile_overlap', type=float, default=0.25)
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--device', default='cuda:0')
     run(parser.parse_args())

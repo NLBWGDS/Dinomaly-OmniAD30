@@ -10,13 +10,6 @@ import numpy as np
 import torch
 from PIL import Image
 
-from dinomaly_omniad_uni import (
-    parse_args, validate_args, discover_categories, load_checkpoint_model,
-    apply_checkpoint_preprocessing, get_omniad_transforms, get_feature_weights,
-    restore_anomaly_map,
-)
-
-
 def tile_boxes(width, height, grid, overlap):
     if grid < 1 or not 0 <= overlap < 1:
         raise ValueError('grid must be positive and overlap must be in [0, 1)')
@@ -50,6 +43,11 @@ class MapStitcher:
 
 
 def main():
+    from dinomaly_omniad_uni import (
+        parse_args, validate_args, discover_categories, load_checkpoint_model,
+        apply_checkpoint_preprocessing, get_omniad_transforms, get_feature_weights,
+        restore_anomaly_map,
+    )
     from utils import cal_anomaly_maps, get_gaussian_kernel
 
     args = parse_args()

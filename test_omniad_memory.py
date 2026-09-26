@@ -116,7 +116,7 @@ class MemoryTests(unittest.TestCase):
             fake = SimpleNamespace(
                 load_checkpoint_model=lambda args, device: (model, {}),
                 apply_checkpoint_preprocessing=preprocess,
-                get_omniad_transforms=lambda args: (lambda im: torch.tensor(np.array(im)).permute(2, 0, 1).float()/255, None),
+                get_omniad_transforms=lambda args: (lambda im: torch.tensor(np.array(im.resize((16, 16)))).permute(2, 0, 1).float()/255, None),
                 restore_anomaly_map=lambda x, h, w, args: F.interpolate(x, size=(h, w), mode='bilinear', align_corners=False),
                 setup_seed=lambda seed: torch.manual_seed(seed))
             args = SimpleNamespace(predictions=str(source), data_path=str(data), output_dir=str(output),
@@ -178,6 +178,26 @@ class MemoryTests(unittest.TestCase):
             with (root / 'context_iron/scores.csv').open(newline='', encoding='utf-8') as handle:
                 final_rows = list(csv.DictReader(handle))
             self.assertEqual([r['score'] for r in final_rows], [r['score'] for r in rows])
+            args.output_dir = str(root / 'tiled_iron')
+            args.tile_grid, args.tile_overlap = 2, .25
+            with patch.dict('sys.modules', {'dinomaly_omniad_uni': fake}), \
+                    patch('predict_omniad_memory.nearest_distance', wraps=nearest_distance) as retrieval:
+                run(args)
+            calibration_calls = [call for call in retrieval.call_args_list if len(call.args) == 5]
+            self.assertEqual([call.args[4] for call in calibration_calls], [0]*4 + [1]*4)
+            tiled = torch.load(root / 'tiled_iron/normal_bank.pt', weights_only=True)
+            self.assertEqual(tiled['tile_grid'], 2)
+            self.assertEqual(tiled['bank'].shape, (16, 12))
+            self.assertEqual(tiled['owners'].tolist(), [0]*8 + [1]*8)
+            tiled_map = np.load(root / 'tiled_iron/iron_lattice/defect/a.png.npy')
+            self.assertEqual(tiled_map.shape, (16, 16))
+            self.assertTrue(np.isfinite(tiled_map).all())
+            for preserved in (category, 'wafer2'):
+                self.assertEqual((root / 'context' / preserved / 'defect/a.png.npy').read_bytes(),
+                                 (root / 'tiled_iron' / preserved / 'defect/a.png.npy').read_bytes())
+            with (root / 'tiled_iron/scores.csv').open(newline='', encoding='utf-8') as handle:
+                tiled_rows = list(csv.DictReader(handle))
+            self.assertEqual([r['score'] for r in tiled_rows], [r['score'] for r in rows])
 
 
 if __name__ == '__main__':

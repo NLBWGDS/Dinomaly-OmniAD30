@@ -174,3 +174,41 @@ enough; retain the previous baseline if F1 and the 25:6:18 objective regress.
 This adds retrieval cost for iron, so record its manifest timing too. The new
 output contains the new iron bank only; preserve the previous bottle output
 and bank for reproducibility. No files need deletion.
+
+## Scale-Matched Tiled Retrieval for Iron
+
+The whole-image iron branch regressed: pixel F1 0.494165 -> 0.489626 and AUPRO
+0.754967 -> 0.733501. Keep `hard3_memory_context`, NOT the `_iron` candidate.
+Precision and recall both fell; the metrics alone do not establish the cause.
+
+The next hypothesis is scale mismatch / insufficient local defect resolution.
+The accepted iron reconstruction map uses tiled inference, but the attempted
+memory branch used whole-image descriptors. New `--tile_grid 2` uses the SAME
+2x2 overlapping crops for normal-bank fitting, normal calibration and inference.
+Each crop is resized using checkpoint letterboxing. This increases effective
+local sampling resolution, without introducing a new pretrained encoder or
+using anomaly labels. It cannot recreate details absent from the source image.
+
+The per-original-image bank quota remains unchanged. Calibration excludes all
+bank patches from the same original image, not just the current crop. Crops
+are restored and stitched with the existing positive Hann weights. Image scores
+and unselected categories remain untouched. `--tile_grid 1` is still the default
+and retains previous whole-image behavior. No global-view mixture is added to
+the memory branch in this first scale experiment.
+
+```bash
+python -u predict_omniad_memory.py --predictions ./predictions/hard3_memory_context --checkpoint ./saved_results/hard3_784/omniad_dinomaly_uni.pth --output_dir ./predictions/hard3_memory_iron_tiles --category iron_lattice --feature_weights 0.5,0.5 --sampling random --memory_weight 0.25 --context_weight 0.25 --context_kernel 3 --tile_grid 2 --tile_overlap 0.25
+python evaluate_omniad_export.py --predictions ./predictions/hard3_memory_iron_tiles --output ./diagnostics/memory_iron_tiles.json
+```
+
+Use the accepted `hard3_memory_context` as input, never the rejected iron output.
+Compare iron against F1 0.494165, AUPRO 0.754967, Image F1 0.875 and recall
+0.353845. Preserve bottle F1 0.370645 and wafer F1 0.410758. Keep the prior
+baseline unless development results justify replacement.
+
+There are normally four model forwards per image per pass instead of one.
+Views are processed sequentially, but CPU descriptor storage during fitting
+and total runtime increase. This experimental exporter also decodes each crop
+from the source separately; its timings include that overhead. No deployment
+latency claim is made. Bank artifacts record crop configuration. Actual GPU
+accuracy/latency must be measured on the server; local tests use synthetic data.
