@@ -214,6 +214,52 @@ latency claim is made. Bank artifacts record crop configuration. Actual GPU
 accuracy/latency must be measured on the server; local tests use synthetic data.
 # Legacy full-frame retrieval experiment
 
+## Distinct-normal-image retrieval candidate
+
+The single-neighbor ceramic experiment measured Pixel F1=0.1260760843,
+AUPRO=0.8103706250, and Image F1=0.8742514970. Its full30 means were
+0.4349573045 / 0.7529535144 / 0.9071216954 respectively. Keep that export.
+
+`--neighbor_images 3` tests whether reliance on one matching normal image masks
+some defects. For each query patch, first take the closest bank patch within
+each original normal image, then average the three lowest per-image distances.
+Duplicate patches or overlapping crops of one image cannot supply extra votes.
+The same estimator is used for calibration and test inference. Calibration
+excludes every bank patch from the query's original image. At least four normal
+image owners must survive bank selection for this setting.
+
+Default `--neighbor_images 1` preserves the previous global nearest-neighbor
+calculation. This is not conventional patch top-3 averaging. The new estimator
+can also raise scores for rare but valid normal appearances and does not
+guarantee better precision, recall, F1, or AUPRO. It adds retrieval reductions,
+not extra model views. Bank building and normal calibration run again.
+
+```bash
+python -u predict_omniad_memory.py \
+  --predictions ./predictions/all30_detail_candidate \
+  --checkpoint ./saved_results/omniad_dinomaly_uni/omniad_dinomaly_uni.pth \
+  --data_path ../dataset/download/Omni-AD-30-release \
+  --output_dir ./predictions/all30_ceramic_memory_k3 \
+  --category ceramic_wafer \
+  --legacy_full_frame --require_all30 --reference_unselected \
+  --tile_grid 2 --tile_overlap 0.25 \
+  --feature_weights 0.5,0.5 --context_weight 0 \
+  --sampling coreset --bank_size 8192 --memory_weight 0.25 \
+  --neighbor_images 3
+
+python evaluate_omniad_export.py \
+  --predictions ./predictions/all30_ceramic_memory_k3 \
+  --output ./diagnostics/all30_ceramic_memory_k3.json
+```
+
+Use the pre-memory `all30_detail_candidate` source intentionally: feeding the
+already fused `all30_ceramic_memory` would compound the branch and confound this
+ablation. Compare against the accepted single-neighbor report, not only the
+older pre-memory result. Other 29 categories and all image scores stay unchanged.
+Do not replace the accepted result until full30 evaluation and latency checks.
+
+## Original single-neighbor experiment
+
 The latest accepted development candidate is `predictions/all30_detail_candidate`,
 not `all30_detail_gated`. Gating reduced mean Pixel F1 from 0.4337489939 to
 0.4328038708 and is not adopted. Mean AUPRO for the accepted candidate is

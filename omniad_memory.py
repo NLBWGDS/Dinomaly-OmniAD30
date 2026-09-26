@@ -89,12 +89,16 @@ def valid_patches(height, width, grid_h, grid_w, input_size):
     return mask
 
 
-def nearest_distance(query, bank, chunk=256, owners=None, exclude_owner=None):
-    """Exact cosine nearest-neighbor distance with bounded similarity memory."""
+def nearest_distance(query, bank, chunk=256, owners=None, exclude_owner=None, neighbor_images=1):
+    """Mean nearest distances from distinct source images; 1 preserves global NN."""
     if chunk < 1 or query.ndim != 2 or bank.ndim != 2 or not bank.shape[0] or query.shape[1] != bank.shape[1]:
         raise ValueError('Invalid query/bank dimensions or chunk size')
     if not torch.isfinite(query).all() or not torch.isfinite(bank).all():
         raise ValueError('Descriptors must be finite')
+    if not isinstance(neighbor_images, int) or neighbor_images < 1:
+        raise ValueError('neighbor_images must be a positive integer')
+    if neighbor_images > 1 and (owners is None or owners.shape != (len(bank),)):
+        raise ValueError('Bank owners required for distinct-image retrieval')
     if exclude_owner is not None:
         if owners is None or owners.shape != (bank.shape[0],):
             raise ValueError('Bank owners required for leave-one-image-out calibration')
@@ -102,9 +106,25 @@ def nearest_distance(query, bank, chunk=256, owners=None, exclude_owner=None):
         if not keep.any():
             raise ValueError('No other normal images available for calibration')
         bank = bank[keep]
+        owners = owners[keep]
+    if neighbor_images > 1:
+        if owners.dtype != torch.long or owners.device != bank.device:
+            raise ValueError('Bank owners must be int64 on the bank device')
+        image_ids, inverse = torch.unique(owners, return_inverse=True)
+        if len(image_ids) < neighbor_images:
+            raise ValueError('Too few distinct normal images after owner exclusion')
     scores = []
     for part in query.split(chunk):
-        scores.append((1 - (part @ bank.T).amax(dim=1)).clamp(0, 2))
+        similarity = part @ bank.T
+        if neighbor_images == 1:
+            scores.append((1 - similarity.amax(dim=1)).clamp(0, 2))
+        else:
+            # All patches/crops from one original normal image provide one vote.
+            per_image = similarity.new_full((len(part), len(image_ids)), -float('inf'))
+            per_image.scatter_reduce_(1, inverse.expand(len(part), -1), similarity,
+                                      reduce='amax', include_self=True)
+            closest = per_image.topk(neighbor_images, dim=1).values
+            scores.append((1 - closest).clamp(0, 2).mean(dim=1))
     return torch.cat(scores)
 
 

@@ -15,6 +15,23 @@ from predict_omniad_memory import run, configure_memory_geometry, memory_valid_m
 
 
 class MemoryTests(unittest.TestCase):
+    def test_distinct_image_neighbors_ignore_duplicate_patches(self):
+        query = torch.tensor([[1., 0.], [0., 1.]])
+        bank = torch.tensor([[1., 0.]]*5 + [[0., 1.], [-1., 0.]])
+        owners = torch.tensor([10]*5 + [20, 30])
+        old = nearest_distance(query, bank)
+        torch.testing.assert_close(nearest_distance(query, bank, owners=owners, neighbor_images=1),
+                                   old, rtol=0, atol=0)
+        result = nearest_distance(query, bank, chunk=1, owners=owners, neighbor_images=3)
+        torch.testing.assert_close(result, torch.tensor([1., 2/3]))
+        torch.testing.assert_close(result, nearest_distance(query, bank, chunk=8, owners=owners, neighbor_images=3))
+        torch.testing.assert_close(nearest_distance(query[:1], bank, owners=owners,
+                                                   exclude_owner=10, neighbor_images=2), torch.tensor([1.5]))
+        for kwargs in (dict(neighbor_images=2), dict(owners=owners, neighbor_images=4),
+                       dict(owners=owners, exclude_owner=10, neighbor_images=3), dict(neighbor_images=0)):
+            with self.assertRaises(ValueError):
+                nearest_distance(query, bank, **kwargs)
+
     def test_legacy_geometry_is_explicit_and_has_no_padding(self):
         config = SimpleNamespace(preprocess='legacy', image_size=448, crop_size=392)
         with self.assertRaises(ValueError):
@@ -233,6 +250,23 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(artifact['original_geometry']['image_size'], 20)
             self.assertEqual(artifact['inference_geometry']['image_size'], 16)
             self.assertTrue(np.isfinite(np.load(exported[('iron_lattice', 'defect/a.png')][1])).all())
+            for i in range(2, 5):
+                image = data / 'iron_lattice/train/good' / f'{i}.png'
+                Image.fromarray(rng.integers(1, 255, (16, 16, 3), dtype=np.uint8)).save(image)
+            args.output_dir, args.neighbor_images = str(root / 'multi_image'), 3
+            with patch.dict('sys.modules', {'dinomaly_omniad_uni': fake}), \
+                    patch('predict_omniad_memory.nearest_distance', wraps=nearest_distance) as retrieval:
+                run(args)
+            self.assertTrue(all(call.kwargs['neighbor_images'] == 3 for call in retrieval.call_args_list))
+            calibration_calls = [call for call in retrieval.call_args_list if len(call.args) == 5]
+            self.assertEqual([call.args[4] for call in calibration_calls], [i for i in range(5) for _ in range(4)])
+            multi = read_index(root / 'multi_image')
+            for key in multi:
+                self.assertEqual(multi[key][0]['score'], source_records[key][0]['score'])
+                if key[0] != 'iron_lattice':
+                    self.assertEqual(multi[key][1].resolve(), source_records[key][1].resolve())
+            artifact = torch.load(root / 'multi_image/normal_bank.pt', weights_only=True)
+            self.assertEqual(artifact['neighbor_images'], 3)
 
 
 if __name__ == '__main__':

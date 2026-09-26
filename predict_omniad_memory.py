@@ -61,6 +61,9 @@ def run(args):
     projection_dim = getattr(args, 'projection_dim', 64)
     context_weight = getattr(args, 'context_weight', 0.)
     context_kernel = getattr(args, 'context_kernel', 3)
+    neighbor_images = getattr(args, 'neighbor_images', 1)
+    if not isinstance(neighbor_images, int) or neighbor_images < 1:
+        raise ValueError('neighbor_images must be a positive integer')
     tile_grid = getattr(args, 'tile_grid', 1)
     tile_overlap = getattr(args, 'tile_overlap', .25)
     tile_boxes(100, 100, tile_grid, tile_overlap)
@@ -90,6 +93,8 @@ def run(args):
     normal_paths = sorted(p for p in normal_root.rglob('*') if p.is_file() and p.suffix.lower() in extensions)
     if not 2 <= len(normal_paths) <= args.bank_size:
         raise ValueError('Need at least two normal images and bank_size >= normal image count')
+    if len(normal_paths) <= neighbor_images:
+        raise ValueError('Need more normal images than neighbor_images for leave-one-image-out calibration')
     device = torch.device(args.device)
     if device.type == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA unavailable; use --device cpu only for debugging')
@@ -150,8 +155,8 @@ def run(args):
             print(f'Coreset selection: {len(bank)} candidates -> {target_count} patches', flush=True)
             indices = coreset_indices(bank, target_count, projection_dim, args.seed)
             bank, owners = bank[indices], owners[indices]
-            if owners.unique().numel() < 2:
-                raise ValueError('Coreset covers fewer than two images; increase bank_size')
+            if owners.unique().numel() <= neighbor_images:
+                raise ValueError('Coreset covers too few images for leave-one-out retrieval; increase bank_size')
         if device.type == 'cuda':
             torch.cuda.synchronize()
         selection_seconds = time.perf_counter() - selection_start
@@ -161,7 +166,8 @@ def run(args):
             for box in boxes:
                 patches, reconstruction, valid, _ = extract(path, box)
                 # Exclude the original image, including every overlapping crop.
-                distances = nearest_distance(patches[valid], bank, args.query_chunk, owners, i)
+                distances = nearest_distance(patches[valid], bank, args.query_chunk, owners, i,
+                                             neighbor_images=neighbor_images)
                 normal_rec.append(reconstruction[valid].cpu())
                 normal_mem.append(distances.cpu())
             print(f'Normal calibration: {i+1}/{len(normal_paths)}', flush=True)
@@ -170,6 +176,7 @@ def run(args):
                         normal_paths=[str(p.resolve()) for p in normal_paths],
                         arguments=vars(args), crop_size=model_args.crop_size,
                         sampling=sampling, candidate_count=candidate_count,
+                        neighbor_images=neighbor_images,
                         context_weight=context_weight, context_kernel=context_kernel,
                         original_geometry=original_geometry,
                         inference_geometry=dict(preprocess=model_args.preprocess,
@@ -192,7 +199,8 @@ def run(args):
                     stitch = MapStitcher(width, height) if len(boxes) > 1 else None
                     for box in boxes:
                         patches, _, _, (crop_h, crop_w, h, w) = extract(image_path, box)
-                        distance = nearest_distance(patches, bank, args.query_chunk).reshape(1, 1, h, w)
+                        distance = nearest_distance(patches, bank, args.query_chunk, owners=owners,
+                                                    neighbor_images=neighbor_images).reshape(1, 1, h, w)
                         distance = F.interpolate(distance, size=(model_args.crop_size, model_args.crop_size),
                                                  mode='bilinear', align_corners=False)
                         memory = restore_anomaly_map(distance, crop_h, crop_w, model_args)[0, 0].cpu().numpy() * scale
@@ -224,6 +232,8 @@ def run(args):
                     calibration='95th percentile ratio, leave-one-normal-image-out; no anomaly labels',
                     sampling=sampling, candidate_count=candidate_count,
                     descriptor_dimension=bank.shape[1], context_weight=context_weight,
+                    neighbor_images=neighbor_images,
+                    retrieval='Mean nearest cosine distance from distinct original normal images; k=1 is global NN',
                     context_kernel=context_kernel,
                     tile_grid=tile_grid, tile_overlap=tile_overlap,
                     tile_note='Same crop geometry for normal bank, calibration and inference. '
@@ -256,6 +266,8 @@ if __name__ == '__main__':
     parser.add_argument('--context_kernel', type=int, default=3,
                         help='Odd neighborhood size in feature patches, not original-image pixels.')
     parser.add_argument('--query_chunk', type=int, default=256)
+    parser.add_argument('--neighbor_images', type=int, default=1,
+                        help='Average nearest matches from this many distinct normal images; default preserves global NN.')
     parser.add_argument('--tile_grid', type=int, default=1,
                         help='Use identical overlapping crops for normal fitting and test retrieval.')
     parser.add_argument('--tile_overlap', type=float, default=0.25)
