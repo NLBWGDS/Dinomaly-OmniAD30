@@ -11,7 +11,10 @@ import os
 
 _logger = logging.getLogger(__name__)
 
-_WEIGHTS_DIR = "backbones/weights"
+_WEIGHTS_DIR = os.environ.get(
+    "DINOMALY_WEIGHTS_DIR",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backbones", "weights")),
+)
 os.makedirs(_WEIGHTS_DIR, exist_ok=True)
 
 

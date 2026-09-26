@@ -1,0 +1,12 @@
+.git
+.idea
+__pycache__
+*.pyc
+*.pyo
+*.log
+dataset
+saved_results
+predictions
+diagnostics
+backbones/weights
+test_*.py
