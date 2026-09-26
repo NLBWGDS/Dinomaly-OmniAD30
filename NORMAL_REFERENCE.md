@@ -142,3 +142,35 @@ Compare with `memory_bottle.json` (F1 0.365916, AUPRO 0.928418). No retraining
 is required. Context can also weaken subtle-defect discrimination; synthetic
 tests validate implementation, not real accuracy. Retain the random baseline
 unless authorized development evaluation supports replacement.
+
+## Extend to Iron Lattice Without Reprocessing Bottle
+
+Measured context-bottle result: pixel F1 0.370645, AUPRO 0.931648 and Image F1
+0.823529. Keep `hard3_memory_context` as the current best measured development
+baseline. Three-category mean pixel F1 is 0.425189, AUPRO 0.829434, Image F1
+0.894045. These numbers are not evidence of private-test generalization.
+
+The next controlled experiment applies the existing context retrieval branch to
+iron_lattice only. Its baseline precision is 0.818907 but recall only 0.353845;
+the objective is to recover missed defects without excessive false positives.
+The same inference algorithm is reused; no new model or training loss is added.
+Explicit feature weights 0.5,0.5 retain iron's original group weighting instead
+of the script's bottle-oriented default 0.25,0.75.
+
+```bash
+python -u predict_omniad_memory.py --predictions ./predictions/hard3_memory_context --checkpoint ./saved_results/hard3_784/omniad_dinomaly_uni.pth --output_dir ./predictions/hard3_memory_context_iron --category iron_lattice --feature_weights 0.5,0.5 --sampling random --memory_weight 0.25 --context_weight 0.25 --context_kernel 3
+python evaluate_omniad_export.py --predictions ./predictions/hard3_memory_context_iron --output ./diagnostics/memory_context_iron.json
+```
+
+Unlike earlier bottle variants, input now intentionally uses the successful
+bottle export: the selected category is DIFFERENT. The exporter copies bottle
+and wafer maps byte-for-byte, and all CSV image scores are unchanged. An
+end-to-end synthetic regression covers this sequential workflow. Do not select
+bottle again on this input, which would double-fuse that category.
+
+Compare iron against pixel F1 0.494165, AUPRO 0.754967, Image F1 0.875. Compare
+all three means against `memory_context.json`. A recall increase alone is not
+enough; retain the previous baseline if F1 and the 25:6:18 objective regress.
+This adds retrieval cost for iron, so record its manifest timing too. The new
+output contains the new iron bank only; preserve the previous bottle output
+and bank for reproducibility. No files need deletion.

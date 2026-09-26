@@ -97,7 +97,7 @@ class MemoryTests(unittest.TestCase):
             with (source / 'scores.csv').open('w', newline='', encoding='utf-8') as handle:
                 writer = csv.writer(handle)
                 writer.writerow(['category', 'image_path', 'score', 'map_path'])
-                for name in (category, 'wafer2'):
+                for name in (category, 'wafer2', 'iron_lattice'):
                     image_path = data / name / 'test/defect/a.png'
                     image_path.parent.mkdir(parents=True)
                     Image.fromarray(rng.integers(1, 255, (16, 16, 3), dtype=np.uint8)).save(image_path)
@@ -128,7 +128,7 @@ class MemoryTests(unittest.TestCase):
                     run(args)
             with (output / 'scores.csv').open(newline='', encoding='utf-8') as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual(len(rows), 2)
+            self.assertEqual(len(rows), 3)
             self.assertTrue(all(r['score'] == '0.12345678912345678' for r in rows))
             self.assertEqual((source / 'wafer2/defect/a.png.npy').read_bytes(),
                              (output / 'wafer2/defect/a.png.npy').read_bytes())
@@ -160,6 +160,24 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual([r['score'] for r in context_rows], [r['score'] for r in rows])
             self.assertEqual((source / 'wafer2/defect/a.png.npy').read_bytes(),
                              (root / 'context/wafer2/defect/a.png.npy').read_bytes())
+            # Apply another category to the accepted bottle export, without
+            # blending bottle scores for a second time.
+            for i in range(2):
+                path = data / 'iron_lattice/train/good' / f'{i}.png'
+                path.parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(rng.integers(1, 255, (16, 16, 3), dtype=np.uint8)).save(path)
+            args.predictions = str(root / 'context')
+            args.output_dir = str(root / 'context_iron')
+            args.category, args.feature_weights = 'iron_lattice', '0.5,0.5'
+            with patch.dict('sys.modules', {'dinomaly_omniad_uni': fake}):
+                run(args)
+            for preserved in (category, 'wafer2'):
+                self.assertEqual((root / 'context' / preserved / 'defect/a.png.npy').read_bytes(),
+                                 (root / 'context_iron' / preserved / 'defect/a.png.npy').read_bytes())
+            self.assertFalse(np.allclose(np.load(root / 'context_iron/iron_lattice/defect/a.png.npy'), .2))
+            with (root / 'context_iron/scores.csv').open(newline='', encoding='utf-8') as handle:
+                final_rows = list(csv.DictReader(handle))
+            self.assertEqual([r['score'] for r in final_rows], [r['score'] for r in rows])
 
 
 if __name__ == '__main__':
