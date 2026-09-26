@@ -20,6 +20,7 @@ from PIL import Image
 from evaluate_omniad_all30 import dataset_inventory, require_exact_keys
 from export_omniad_routed import read_index
 from predict_omniad_tiled import MapStitcher
+from omniad_normal_calibration import fit_normal_calibration, calibrate_border
 
 
 def coverage_boxes(side, crop):
@@ -109,9 +110,15 @@ def main():
     parser.add_argument('--categories', default='nameplate7,ceramic_wafer,spindle_top,chip1')
     parser.add_argument('--batch_size', type=int, default=2)
     parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--normal_calibration', action='store_true',
+                        help='Fit border score calibration from train/good only; preserve center scores.')
+    parser.add_argument('--calibration_grid', type=int, default=32)
+    parser.add_argument('--calibration_strength', type=float, default=.5)
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error('batch_size must be positive')
+    if args.calibration_grid < 2 or not np.isfinite(args.calibration_strength) or not 0 <= args.calibration_strength <= 1:
+        parser.error('Invalid calibration grid or strength')
     categories, expected = dataset_inventory(args.data_path)
     selected = {c.strip() for c in args.categories.split(',') if c.strip()}
     if not selected or not selected <= set(categories):
@@ -143,10 +150,7 @@ def main():
     timings = []
 
     @torch.inference_mode()
-    def predict_map(path):
-        if device.type == 'cuda':
-            torch.cuda.synchronize()
-        start = time.perf_counter()
+    def make_canvas(path):
         with Image.open(path) as image:
             width, height = image.size
             resized = TF.resize(image.convert('RGB'), [config.image_size, config.image_size],
@@ -156,7 +160,40 @@ def main():
             en, de = model(batch.to(device))
             maps, _ = cal_anomaly_maps(en, de, config.crop_size, feature_weights=[.5, .5])
             return kernel(maps)[:, 0].cpu().numpy()
-        canvas = torch.from_numpy(coverage_canvas(tensor, config.crop_size, args.batch_size, infer_batch))[None, None]
+        return coverage_canvas(tensor, config.crop_size, args.batch_size, infer_batch), (height, width)
+
+    calibrations, calibration_paths = {}, {}
+    calibration_start = time.perf_counter()
+    if args.normal_calibration:
+        if args.calibration_grid > config.image_size:
+            raise ValueError('Calibration grid exceeds resized canvas size')
+        extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
+        for category in sorted(selected):
+            root = Path(args.data_path) / category / 'train' / 'good'
+            paths = sorted(p for p in root.rglob('*') if p.is_file() and p.suffix.lower() in extensions)
+            if len(paths) < 5:
+                raise ValueError(f'{category}: need at least five train/good images')
+            calibration_paths[category] = [str(p.resolve()) for p in paths]
+            def normal_maps():
+                for index, path in enumerate(paths):
+                    canvas, _ = make_canvas(path)
+                    if (index+1) % 10 == 0 or index+1 == len(paths):
+                        print(f'{category}: normal calibration {index+1}/{len(paths)}', flush=True)
+                    yield canvas
+            calibrations[category] = fit_normal_calibration(normal_maps(), config.image_size,
+                                                            boxes[0], args.calibration_grid)
+    calibration_seconds = time.perf_counter() - calibration_start
+    category_by_path = {str(p.resolve()): key[0] for key, p in expected.items()}
+
+    def predict_map(path):
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        start = time.perf_counter()
+        canvas, (height, width) = make_canvas(path)
+        category = category_by_path[str(path.resolve())]
+        if category in calibrations:
+            canvas = calibrate_border(canvas, calibrations[category], args.calibration_strength)
+        canvas = torch.from_numpy(canvas)[None, None]
         result = F.interpolate(canvas, size=(height, width), mode='bilinear', align_corners=False)[0, 0].numpy()
         if device.type == 'cuda':
             torch.cuda.synchronize()
@@ -164,12 +201,16 @@ def main():
         return result
 
     export_predictions(records, expected, selected, args.output_dir, predict_map)
+    for category, calibration in calibrations.items():
+        np.savez_compressed(Path(args.output_dir) / f'{category}_normal_calibration.npz', **calibration)
     manifest = dict(arguments=vars(args), selected_categories=sorted(selected),
                     preprocess=config.preprocess, image_size=config.image_size, crop_size=config.crop_size,
                     previously_unseen_area_fraction=missing_fraction, windows=boxes,
                     fusion='Keep original center window; weighted shifted-window scores fill outside only',
                     image_scores='Copied unchanged from baseline CSV',
                     labels_used=False, mean_branch_ms=float(np.mean(timings)),
+                    normal_calibration=args.normal_calibration, calibration_images=calibration_paths,
+                    calibration_seconds=calibration_seconds,
                     note='Experimental coverage ablation, not proven improvement. '
                          'References unselected baseline maps; preserve source directories. '
                          'Timing excludes export and prior baseline inference, no warmup.')

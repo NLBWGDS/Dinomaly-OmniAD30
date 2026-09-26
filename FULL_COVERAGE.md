@@ -104,3 +104,54 @@ are not a representative sample of model performance. Thresholds depend on
 development labels and must not be treated as deployable calibration. To check
 histogram resolution sensitivity, a later run may use a new output directory
 and `--bins 65536`; the default4096 matches the current evaluator.
+
+## Normal-Only Border Calibration Candidate
+
+The supplied audit confirmed center score changes below 2.35e-7 and identical
+center TP/FP/FN at the original threshold. Ceramic and chip normal border means
+were approximately 2.55 times their center means. These are DEVELOPMENT
+observations, not values used to fit the calibration below. Crop coverage misses
+real defects, but raw border prediction also raises false positives substantially.
+
+The opt-in `--normal_calibration` branch learns a per-category spatial normal
+reference using ONLY `train/good`. Each normal image runs through the same
+full-coverage predictor as inference. Area-averaged 32x32 grids bound storage;
+at each grid cell, median and 95th percentile across normal images define local
+offset and spread. The distribution of normal grid cells wholly inside the
+original center defines a common reference median and spread. Quantile grids
+are interpolated to the resized canvas before correcting border scores.
+
+The affine gain is clipped to [0.25,4], corrected values are nonnegative, and
+the first candidate uses 50% raw + 50% corrected border scores. Center scores
+are copied back unchanged before original-resolution interpolation. No masks,
+development thresholds, or per-test-image statistics are used in fitting.
+At least five normal images and nondegenerate normal reference variation are
+required. Test predictions never update the fit. These hyperparameters are
+fixed experimental starting choices, not validated optimum values.
+
+```bash
+python -u predict_omniad_fullcoverage.py --predictions ./diagnostics/all30_current/current_predictions --checkpoint ./saved_results/omniad_dinomaly_uni/omniad_dinomaly_uni.pth --output_dir ./predictions/all30_calibrated_coverage --categories nameplate7,ceramic_wafer,spindle_top,chip1 --normal_calibration --calibration_strength 0.5 --batch_size 2
+python evaluate_omniad_export.py --predictions ./predictions/all30_calibrated_coverage --output ./diagnostics/all30_calibrated_coverage.json
+```
+
+Use the accepted all30 baseline as input, NOT the rejected fullcoverage export.
+Only four category maps are regenerated, but all30 are evaluated. Input maps
+of the other26 categories and ALL CSV image scores remain unchanged. The
+comparison baseline remains Pixel F1 0.427451, AUPRO 0.711004, Image F1 0.907122.
+Also inspect each changed category; do not let mean AUPRO hide an F1 collapse.
+
+Per-category `<category>_normal_calibration.npz` artifacts store normal quantile
+grids, reference statistics, geometry and sample count. The coverage manifest
+records normal image paths, arguments and fitting time. It never saves derived
+development-label thresholds as deployment calibration. There is no additional
+gradient training, but generating normal-image maps adds GPU runtime. Current
+entry point refits calibration per run rather than providing an artifact-load
+production mode. Preserve checkpoint, normal data, manifests and calibration
+files to reproduce the experiment.
+
+Position-dependent calibration assumes normal training images represent the
+pose/edge distributions of deployment data. Pose changes or scarce samples can
+make it harmful. It cannot recover defects absent from the features, and there
+may still be score discontinuities at the old crop boundary. This is a tested
+implementation of a hypothesis, NOT a measured improvement until all30
+development results are available. Private test labels must not guide fitting.
