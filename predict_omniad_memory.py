@@ -35,6 +35,12 @@ def run(args):
     sampling = getattr(args, 'sampling', 'random')
     multiplier = getattr(args, 'candidate_multiplier', 4)
     projection_dim = getattr(args, 'projection_dim', 64)
+    context_weight = getattr(args, 'context_weight', 0.)
+    context_kernel = getattr(args, 'context_kernel', 3)
+    if not np.isfinite(context_weight) or not 0 <= context_weight <= 1:
+        raise ValueError('context_weight must be in [0,1]')
+    if context_kernel < 1 or context_kernel % 2 != 1:
+        raise ValueError('context_kernel must be a positive odd integer')
     if sampling not in ('random', 'coreset') or multiplier < 1 or projection_dim < 1:
         raise ValueError('Invalid sampling mode, candidate multiplier or projection dimension')
     records = read_index(Path(args.predictions))
@@ -76,7 +82,8 @@ def run(args):
         en, de = model(batch)
         h, w = en[0].shape[-2:]
         valid = valid_patches(height, width, h, w, model_args.crop_size).to(device)
-        patches = descriptors(en, weights)
+        patches = descriptors(en, weights, context_weight, context_kernel,
+                              valid.reshape(1, h, w))
         reconstruction = sum(weight / sum(weights) * (1 - F.cosine_similarity(a, b, dim=1))
                              for a, b, weight in zip(en, de, weights)).clamp_min(0).flatten()
         return patches, reconstruction, valid, (height, width, h, w)
@@ -121,7 +128,8 @@ def run(args):
         torch.save(dict(bank=bank.cpu(), owners=owners.cpu(), scale=scale,
                         normal_paths=[str(p.resolve()) for p in normal_paths],
                         arguments=vars(args), crop_size=model_args.crop_size,
-                        sampling=sampling, candidate_count=candidate_count), output / 'normal_bank.pt')
+                        sampling=sampling, candidate_count=candidate_count,
+                        context_weight=context_weight, context_kernel=context_kernel), output / 'normal_bank.pt')
         print(f'Bank patches: {len(bank)}, normal-only scale: {scale:.6f}', flush=True)
         timings = []
         with (output / 'scores.csv').open('w', newline='', encoding='utf-8') as handle:
@@ -156,6 +164,8 @@ def run(args):
                     image_scores='Copied verbatim; unselected category maps copied byte-for-byte',
                     calibration='95th percentile ratio, leave-one-normal-image-out; no anomaly labels',
                     sampling=sampling, candidate_count=candidate_count,
+                    descriptor_dimension=bank.shape[1], context_weight=context_weight,
+                    context_kernel=context_kernel,
                     selection_seconds=selection_seconds,
                     sampling_note='Random per-image pool; optional projected farthest-first coreset. '
                                   'Original full-dimensional features retained for retrieval; not full PatchCore.',
@@ -179,6 +189,10 @@ if __name__ == '__main__':
     parser.add_argument('--sampling', choices=['random', 'coreset'], default='random')
     parser.add_argument('--candidate_multiplier', type=int, default=4)
     parser.add_argument('--projection_dim', type=int, default=64)
+    parser.add_argument('--context_weight', type=float, default=0.,
+                        help='Neighbor-descriptor weight; zero preserves the original memory branch.')
+    parser.add_argument('--context_kernel', type=int, default=3,
+                        help='Odd neighborhood size in feature patches, not original-image pixels.')
     parser.add_argument('--query_chunk', type=int, default=256)
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--device', default='cuda:0')

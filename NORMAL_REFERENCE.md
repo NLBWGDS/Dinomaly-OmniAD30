@@ -107,3 +107,38 @@ References inspected:
 Our Gaussian projection, single seeded start, bounded candidate pool and duplicate
 suppression are implementation choices, not a claim to reproduce the official
 sampler. No external industrial data or pretrained industrial weights are added.
+
+## Detail Plus Neighborhood Candidate
+
+Measured coreset bottle result: pixel F1 0.366931, AUPRO 0.921158, Image F1
+0.823529. Compared to random selection, the small F1 gain did not offset AUPRO
+loss under the requested 25:6:18 priorities. Keep `hard3_memory_bottle` as the
+overall development baseline; keep coreset as a separate F1-leading candidate.
+
+The next experiment retains random sampling, the same sampled patch positions,
+and the 25% memory-map fusion. Only the retrieval descriptor changes. It
+concatenates the original normalized descriptor with a separately normalized
+3x3 neighborhood-average descriptor. Square-root weights assign 75% of their
+dot product to center detail and 25% to context. This is feature-space context,
+not another blur of the output anomaly map. It is inspired by local aggregation
+in PatchCore but retains an explicit unsmoothed center branch, unlike a direct
+replacement by pooled features. No claim of full reproduction is made.
+
+Neighbor aggregation excludes letterbox padding via a geometry-only boolean
+mask. The bank, queries and normal-only calibration all use the same new
+descriptor. Calibration scale is necessarily refit; masks/labels are never used.
+The original normal-image sampling and image-level scores remain unchanged.
+Default `--context_weight 0` retains the previous behavior exactly. Bank feature
+dimension doubles for nonzero context weight, increasing bank storage and
+retrieval arithmetic. Similarity chunk size and encoder input size are unchanged.
+
+```bash
+python -u predict_omniad_memory.py --predictions ./predictions/hard3_routed --checkpoint ./saved_results/hard3_784/omniad_dinomaly_uni.pth --output_dir ./predictions/hard3_memory_context --sampling random --context_weight 0.25 --context_kernel 3
+python evaluate_omniad_export.py --predictions ./predictions/hard3_memory_context --output ./diagnostics/memory_context.json
+```
+
+Again, do not feed an already memory-fused directory back into this experiment.
+Compare with `memory_bottle.json` (F1 0.365916, AUPRO 0.928418). No retraining
+is required. Context can also weaken subtle-defect discrimination; synthetic
+tests validate implementation, not real accuracy. Retain the random baseline
+unless authorized development evaluation supports replacement.

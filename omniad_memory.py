@@ -39,18 +39,39 @@ def coreset_indices(features, count, projection_dim=64, seed=1):
     return selected
 
 
-def descriptors(features, weights):
+def descriptors(features, weights, context_weight=0., context_kernel=3, valid_mask=None):
     if not features or len(features) != len(weights):
         raise ValueError('One weight per feature group is required')
     if any(not math.isfinite(w) or w < 0 for w in weights) or sum(weights) <= 0:
         raise ValueError('Feature weights must be finite, nonnegative and have a positive sum')
+    if not math.isfinite(context_weight) or not 0 <= context_weight <= 1:
+        raise ValueError('context_weight must be in [0,1]')
+    if not isinstance(context_kernel, int) or context_kernel < 1 or context_kernel % 2 != 1:
+        raise ValueError('context_kernel must be a positive odd integer')
     shape = features[0].shape
     if len(shape) != 4 or any(x.ndim != 4 or x.shape[0] != shape[0] or x.shape[2:] != shape[2:]
                               for x in features):
         raise ValueError('Feature groups must share batch and spatial dimensions')
     normalized = [F.normalize(x.float(), dim=1) * math.sqrt(w / sum(weights))
                   for x, w in zip(features, weights)]
-    return torch.cat(normalized, dim=1).permute(0, 2, 3, 1).reshape(-1, sum(x.shape[1] for x in features))
+    detail = torch.cat(normalized, dim=1)
+    if context_weight > 0:
+        if valid_mask is None:
+            mask = torch.ones((shape[0], 1, *shape[2:]), device=detail.device)
+        else:
+            if valid_mask.shape != (shape[0], *shape[2:]) or valid_mask.dtype != torch.bool:
+                raise ValueError('valid_mask must be boolean [batch,height,width]')
+            mask = valid_mask.unsqueeze(1).to(device=detail.device, dtype=torch.float32)
+        def pool(x):
+            return F.avg_pool2d(x, context_kernel, stride=1, padding=context_kernel // 2,
+                                count_include_pad=False)
+        support = pool(mask).clamp_min(1e-8)
+        context = [F.normalize(pool(x.float() * mask) / support, dim=1) * math.sqrt(w / sum(weights))
+                   for x, w in zip(features, weights)]
+        # Retain the center descriptor; context is extra evidence, not heatmap smoothing.
+        detail = torch.cat([detail * math.sqrt(1 - context_weight),
+                            torch.cat(context, dim=1) * math.sqrt(context_weight)], dim=1)
+    return detail.permute(0, 2, 3, 1).reshape(-1, detail.shape[1])
 
 
 def valid_patches(height, width, grid_h, grid_w, input_size):

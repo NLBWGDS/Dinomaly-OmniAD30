@@ -15,6 +15,35 @@ from predict_omniad_memory import run
 
 
 class MemoryTests(unittest.TestCase):
+    def test_context_preserves_detail_and_adds_neighbor_evidence(self):
+        a = torch.zeros(1, 2, 3, 3)
+        a[:, 1] = 1
+        a[:, :, 1, 1] = torch.tensor([1., 0.])
+        b = a.clone()
+        b[:, 1] *= -1
+        detail_a, detail_b = descriptors([a], [1.]), descriptors([b], [1.])
+        mixed_a = descriptors([a], [1.], .25)
+        mixed_b = descriptors([b], [1.], .25)
+        torch.testing.assert_close(descriptors([a], [1.], 0), detail_a, rtol=0, atol=0)
+        torch.testing.assert_close(detail_a[4], detail_b[4])
+        torch.testing.assert_close(mixed_a[:, :2], detail_a * (.75 ** .5))
+        torch.testing.assert_close(mixed_a.norm(dim=1), torch.ones(9))
+        self.assertGreater((1 - mixed_a[4] @ mixed_b[4]).item(), .1)
+
+    def test_context_ignores_padding_values(self):
+        mask = torch.zeros(1, 3, 3, dtype=torch.bool)
+        mask[:, 1, 1] = True
+        a = torch.ones(1, 2, 3, 3)
+        b = a.clone()
+        b[:, :, ~mask[0]] = 1000
+        b[:, 1, ~mask[0]] = -1000
+        x = descriptors([a], [1.], .25, valid_mask=mask)
+        y = descriptors([b], [1.], .25, valid_mask=mask)
+        torch.testing.assert_close(x[4], y[4])
+        for weight, kernel in ((-1., 3), (float('nan'), 3), (.25, 2)):
+            with self.assertRaises(ValueError):
+                descriptors([a], [1.], weight, kernel)
+
     def test_coreset_coverage_and_reproducibility(self):
         x = torch.tensor([[0., 0.]] * 20 + [[10., 0.], [0., 10.]])
         selected = coreset_indices(x, 3, seed=7)
@@ -117,6 +146,20 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(artifact['bank'].shape[0], 16)
             self.assertEqual(artifact['candidate_count'], 32)
             self.assertGreaterEqual(artifact['owners'].unique().numel(), 2)
+            args.output_dir = str(root / 'context')
+            args.sampling, args.context_weight, args.context_kernel = 'random', .25, 3
+            with patch.dict('sys.modules', {'dinomaly_omniad_uni': fake}):
+                run(args)
+            contextual = torch.load(root / 'context/normal_bank.pt', weights_only=True)
+            original = torch.load(output / 'normal_bank.pt', weights_only=True)
+            torch.testing.assert_close(contextual['owners'], original['owners'])
+            torch.testing.assert_close(contextual['bank'][:, :6], original['bank'] * (.75 ** .5))
+            self.assertEqual(contextual['bank'].shape, (16, 12))
+            with (root / 'context/scores.csv').open(newline='', encoding='utf-8') as handle:
+                context_rows = list(csv.DictReader(handle))
+            self.assertEqual([r['score'] for r in context_rows], [r['score'] for r in rows])
+            self.assertEqual((source / 'wafer2/defect/a.png.npy').read_bytes(),
+                             (root / 'context/wafer2/defect/a.png.npy').read_bytes())
 
 
 if __name__ == '__main__':
