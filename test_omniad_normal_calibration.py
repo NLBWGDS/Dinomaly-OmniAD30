@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from omniad_normal_calibration import fit_normal_calibration, calibrate_border
+from omniad_normal_calibration import fit_normal_calibration, calibrate_border, blend_detail_map
 from predict_omniad_fullcoverage import coverage_canvas
 import torch
 
@@ -61,6 +61,30 @@ class NormalCalibrationTests(unittest.TestCase):
         self.assertEqual(corrected.shape, raw.shape)
         self.assertLess(float(corrected[0, 0]), float(raw[0, 0]))
         np.testing.assert_array_equal(corrected[4:12, 4:12], raw[4:12, 4:12])
+
+    def test_detail_calibrates_center_and_matches_reference_scale(self):
+        calibration = dict(self.calibration, reference_median=.02, reference_high=.029)
+        query = self.maps[10].copy()
+        query[7, 7] += .05
+        baseline = np.full((16, 16), .08, dtype=np.float32)
+        result = blend_detail_map(baseline, query, calibration, .25)
+        self.assertAlmostEqual(float(result[0, 1]), .065, places=5)
+        self.assertAlmostEqual(float(result[7, 8]), .065, places=5)
+        self.assertAlmostEqual(float(result[7, 7] - result[7, 8]), .0125, places=5)
+        np.testing.assert_array_equal(baseline, np.full((16, 16), .08, dtype=np.float32))
+        np.testing.assert_array_equal(blend_detail_map(baseline, query, calibration, 0), baseline)
+
+    def test_detail_original_size_and_invalid_inputs(self):
+        baseline = np.full((23, 37), .04, dtype=np.float32)
+        result = blend_detail_map(baseline, self.maps[10], self.calibration, .25)
+        self.assertEqual(result.shape, (23, 37))
+        self.assertEqual(result.dtype, np.float32)
+        self.assertTrue(np.isfinite(result).all())
+        for weight in (-.1, 1.1, float('nan')):
+            with self.assertRaises(ValueError):
+                blend_detail_map(baseline, self.maps[10], self.calibration, weight)
+        with self.assertRaises(ValueError):
+            blend_detail_map(baseline * np.nan, self.maps[10], self.calibration, .25)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,8 @@
 """Fill unseen borders of legacy center-crop inference, preserving center scores.
 
-Uses the original resize scale and crop size. No anomaly labels are consumed.
+Default mode uses the original resize scale and crop size. Optional detail mode
+blends higher-resolution windows into source maps and may change center scores.
+No anomaly labels are consumed.
 All image-level scores and all unselected maps are retained from the baseline.
 """
 
@@ -20,7 +22,7 @@ from PIL import Image
 from evaluate_omniad_all30 import dataset_inventory, require_exact_keys
 from export_omniad_routed import read_index
 from predict_omniad_tiled import MapStitcher
-from omniad_normal_calibration import fit_normal_calibration, calibrate_border
+from omniad_normal_calibration import fit_normal_calibration, calibrate_border, blend_detail_map
 
 
 def coverage_boxes(side, crop):
@@ -34,10 +36,11 @@ def coverage_boxes(side, crop):
 
 
 class CoverageStitcher:
-    def __init__(self, side, center_box):
+    def __init__(self, side, center_box, preserve_center=True):
         self.stitch = MapStitcher(side, side)
         self.center_box = center_box
         self.center = None
+        self.preserve_center = preserve_center
 
     def add(self, box, scores):
         if not np.isfinite(scores).all():
@@ -51,15 +54,16 @@ class CoverageStitcher:
             raise ValueError('Missing original center-crop prediction')
         result = self.stitch.finish()
         x0, y0, x1, y1 = self.center_box
-        result[y0:y1, x0:x1] = self.center
+        if self.preserve_center:
+            result[y0:y1, x0:x1] = self.center
         return result
 
 
-def coverage_canvas(tensor, crop_size, batch_size, infer_batch):
+def coverage_canvas(tensor, crop_size, batch_size, infer_batch, preserve_center=True):
     if tensor.ndim != 3 or tensor.shape[-2] != tensor.shape[-1] or batch_size < 1:
         raise ValueError('Expected square CHW tensor and positive batch size')
     boxes = coverage_boxes(tensor.shape[-1], crop_size)
-    stitch = CoverageStitcher(tensor.shape[-1], boxes[0])
+    stitch = CoverageStitcher(tensor.shape[-1], boxes[0], preserve_center)
     for offset in range(0, len(boxes), batch_size):
         subset = boxes[offset:offset + batch_size]
         batch = torch.stack([tensor[:, y0:y1, x0:x1] for x0, y0, x1, y1 in subset])
@@ -111,14 +115,21 @@ def main():
     parser.add_argument('--batch_size', type=int, default=2)
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--normal_calibration', action='store_true',
-                        help='Fit border score calibration from train/good only; preserve center scores.')
+                        help='Fit train/good calibration: borders in default mode, all pixels in detail mode.')
     parser.add_argument('--calibration_grid', type=int, default=32)
     parser.add_argument('--calibration_strength', type=float, default=.5)
+    parser.add_argument('--detail_scale', type=int, choices=(1, 2), default=1,
+                        help='2: normal-calibrated higher-resolution windows blended into source maps.')
+    parser.add_argument('--detail_weight', type=float, default=.25)
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error('batch_size must be positive')
     if args.calibration_grid < 2 or not np.isfinite(args.calibration_strength) or not 0 <= args.calibration_strength <= 1:
         parser.error('Invalid calibration grid or strength')
+    if not np.isfinite(args.detail_weight) or not 0 < args.detail_weight <= 1:
+        parser.error('detail_weight must be in (0,1]')
+    if args.detail_scale > 1 and not args.normal_calibration:
+        parser.error('Detail inference requires --normal_calibration')
     categories, expected = dataset_inventory(args.data_path)
     selected = {c.strip() for c in args.categories.split(',') if c.strip()}
     if not selected or not selected <= set(categories):
@@ -143,26 +154,33 @@ def main():
         raise ValueError('This experiment requires legacy center cropping with crop_size < image_size; '
                          'the supplied checkpoint does not have the hypothesized missing border')
     boxes = coverage_boxes(config.image_size, config.crop_size)
+    detail_side = config.image_size * args.detail_scale
+    detail_boxes = coverage_boxes(detail_side, config.crop_size)
     kernel = get_gaussian_kernel(3, 1.).to(device)
     missing_fraction = 1 - (config.crop_size / config.image_size)**2
     print(f'Legacy resize={config.image_size}, crop={config.crop_size}; '
           f'previously unseen area={missing_fraction:.2%}; views/image={len(boxes)}', flush=True)
     timings = []
+    if args.detail_scale > 1:
+        print(f'Detail canvas={detail_side}, fixed model crop={config.crop_size}; '
+              f'views/image={len(detail_boxes)}; source-map blend={args.detail_weight}', flush=True)
 
     @torch.inference_mode()
-    def make_canvas(path):
+    def make_canvas(path, side=None):
+        side = config.image_size if side is None else side
         with Image.open(path) as image:
             width, height = image.size
-            resized = TF.resize(image.convert('RGB'), [config.image_size, config.image_size],
+            resized = TF.resize(image.convert('RGB'), [side, side],
                                 interpolation=InterpolationMode.BILINEAR)
             tensor = TF.normalize(TF.to_tensor(resized), IMAGENET_MEAN, IMAGENET_STD)
         def infer_batch(batch):
             en, de = model(batch.to(device))
             maps, _ = cal_anomaly_maps(en, de, config.crop_size, feature_weights=[.5, .5])
             return kernel(maps)[:, 0].cpu().numpy()
-        return coverage_canvas(tensor, config.crop_size, args.batch_size, infer_batch), (height, width)
+        return coverage_canvas(tensor, config.crop_size, args.batch_size, infer_batch,
+                               preserve_center=(side == config.image_size)), (height, width)
 
-    calibrations, calibration_paths = {}, {}
+    calibrations, calibration_paths, detail_calibrations = {}, {}, {}
     calibration_start = time.perf_counter()
     if args.normal_calibration:
         if args.calibration_grid > config.image_size:
@@ -182,19 +200,41 @@ def main():
                     yield canvas
             calibrations[category] = fit_normal_calibration(normal_maps(), config.image_size,
                                                             boxes[0], args.calibration_grid)
+            if args.detail_scale > 1:
+                def detail_normal_maps():
+                    for index, path in enumerate(paths):
+                        canvas, _ = make_canvas(path, detail_side)
+                        if (index+1) % 10 == 0 or index+1 == len(paths):
+                            print(f'{category}: detail calibration {index+1}/{len(paths)}', flush=True)
+                        yield canvas
+                fitted = fit_normal_calibration(detail_normal_maps(), detail_side,
+                                                detail_boxes[0], args.calibration_grid * args.detail_scale)
+                # Use only normal training scores to align scales across resolutions.
+                for name in ('reference_median', 'reference_high'):
+                    fitted[name] = calibrations[category][name]
+                detail_calibrations[category] = fitted
     calibration_seconds = time.perf_counter() - calibration_start
     category_by_path = {str(p.resolve()): key[0] for key, p in expected.items()}
+    key_by_path = {str(p.resolve()): key for key, p in expected.items()}
 
     def predict_map(path):
         if device.type == 'cuda':
             torch.cuda.synchronize()
         start = time.perf_counter()
-        canvas, (height, width) = make_canvas(path)
         category = category_by_path[str(path.resolve())]
-        if category in calibrations:
-            canvas = calibrate_border(canvas, calibrations[category], args.calibration_strength)
-        canvas = torch.from_numpy(canvas)[None, None]
-        result = F.interpolate(canvas, size=(height, width), mode='bilinear', align_corners=False)[0, 0].numpy()
+        if args.detail_scale > 1:
+            canvas, shape = make_canvas(path, detail_side)
+            source = records[key_by_path[str(path.resolve())]][1]
+            baseline = np.load(source, allow_pickle=False)
+            if baseline.shape != shape:
+                raise ValueError(f'Baseline map is not original-sized: {source}')
+            result = blend_detail_map(baseline, canvas, detail_calibrations[category], args.detail_weight)
+        else:
+            canvas, (height, width) = make_canvas(path)
+            if category in calibrations:
+                canvas = calibrate_border(canvas, calibrations[category], args.calibration_strength)
+            canvas = torch.from_numpy(canvas)[None, None]
+            result = F.interpolate(canvas, size=(height, width), mode='bilinear', align_corners=False)[0, 0].numpy()
         if device.type == 'cuda':
             torch.cuda.synchronize()
         timings.append((time.perf_counter() - start) * 1000)
@@ -203,10 +243,15 @@ def main():
     export_predictions(records, expected, selected, args.output_dir, predict_map)
     for category, calibration in calibrations.items():
         np.savez_compressed(Path(args.output_dir) / f'{category}_normal_calibration.npz', **calibration)
+    for category, calibration in detail_calibrations.items():
+        np.savez_compressed(Path(args.output_dir) / f'{category}_detail_calibration.npz', **calibration)
     manifest = dict(arguments=vars(args), selected_categories=sorted(selected),
                     preprocess=config.preprocess, image_size=config.image_size, crop_size=config.crop_size,
                     previously_unseen_area_fraction=missing_fraction, windows=boxes,
-                    fusion='Keep original center window; weighted shifted-window scores fill outside only',
+                    fusion=('Normal-calibrated detail blended into source maps at original resolution'
+                            if args.detail_scale > 1 else
+                            'Keep original center window; weighted shifted-window scores fill outside only'),
+                    detail_side=detail_side, detail_windows=detail_boxes if args.detail_scale > 1 else [],
                     image_scores='Copied unchanged from baseline CSV',
                     labels_used=False, mean_branch_ms=float(np.mean(timings)),
                     normal_calibration=args.normal_calibration, calibration_images=calibration_paths,

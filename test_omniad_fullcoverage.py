@@ -13,7 +13,7 @@ from predict_omniad_fullcoverage import coverage_boxes, CoverageStitcher, covera
 
 class CoverageTests(unittest.TestCase):
     def test_full_coverage_and_center_geometry(self):
-        for side, crop in [(448, 392), (31, 9), (16, 16), (15, 10)]:
+        for side, crop in [(448, 392), (896, 392), (31, 9), (16, 16), (15, 10)]:
             boxes = coverage_boxes(side, crop)
             coverage = np.zeros((side, side), dtype=bool)
             offset = round((side-crop)/2)
@@ -23,6 +23,7 @@ class CoverageTests(unittest.TestCase):
                 coverage[y0:y1, x0:x1] = True
             self.assertTrue(coverage.all())
         self.assertEqual(len(coverage_boxes(448, 392)), 5)
+        self.assertEqual(len(coverage_boxes(896, 392)), 9)
         with self.assertRaises(ValueError):
             coverage_boxes(10, 11)
 
@@ -47,6 +48,18 @@ class CoverageTests(unittest.TestCase):
             np.testing.assert_allclose(result, tensor[0].numpy(), atol=1e-3)
         with self.assertRaises(ValueError):
             coverage_canvas(tensor, 9, 2, lambda batch: np.zeros((1, 1, 1)))
+
+    def test_detail_stitches_all_windows_without_center_override(self):
+        boxes = coverage_boxes(16, 12)
+        stitch = CoverageStitcher(16, boxes[0], preserve_center=False)
+        for i, box in enumerate(boxes):
+            stitch.add(box, np.full((12, 12), .2 if i == 0 else .8, np.float32))
+        output = stitch.finish()
+        self.assertGreater(float(output[8, 8]), .2)
+        self.assertLessEqual(float(output.max()), .800001)
+        tensor = torch.arange(31*31, dtype=torch.float32).reshape(1, 31, 31)
+        result = coverage_canvas(tensor, 9, 2, lambda batch: batch[:, 0].numpy(), preserve_center=False)
+        np.testing.assert_allclose(result, tensor[0].numpy(), atol=1e-3)
 
     def test_export_preserves_unselected_maps_and_image_scores(self):
         with tempfile.TemporaryDirectory() as tmp:

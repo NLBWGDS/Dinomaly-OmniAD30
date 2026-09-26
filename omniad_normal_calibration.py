@@ -46,7 +46,8 @@ def fit_normal_calibration(normal_maps, side, center_box, grid=32):
                 normal_images=len(samples), side=side, center_box=np.array(center_box, dtype=np.int64))
 
 
-def calibrate_border(scores, calibration, strength=.5):
+def calibrate_border(scores, calibration, strength=.5, preserve_center=True):
+    """Calibrate borders by default; full-map mode is for a separate detail branch."""
     if not np.isfinite(strength) or not 0 <= strength <= 1:
         raise ValueError('Calibration strength must be in [0,1]')
     side = int(calibration['side'])
@@ -66,7 +67,21 @@ def calibrate_border(scores, calibration, strength=.5):
     calibrated = np.maximum((scores - median) * gain + ref_median, 0)
     result = ((1-strength)*scores + strength*calibrated).astype(np.float32)
     left, top, right, bottom = map(int, calibration['center_box'])
-    result[top:bottom, left:right] = scores[top:bottom, left:right]
+    if preserve_center:
+        result[top:bottom, left:right] = scores[top:bottom, left:right]
     if not np.isfinite(result).all():
         raise ValueError('Nonfinite calibrated map')
     return result
+
+
+def blend_detail_map(baseline, detail, calibration, weight):
+    """Blend normal-calibrated detail at original resolution, never binarizing."""
+    if not np.isfinite(weight) or not 0 <= weight <= 1:
+        raise ValueError('Detail weight must be in [0,1]')
+    if baseline.ndim != 2 or not np.isfinite(baseline).all() or np.any(baseline < 0):
+        raise ValueError('Invalid baseline map')
+    if weight == 0:
+        return baseline.copy()
+    corrected = calibrate_border(detail, calibration, 1., preserve_center=False)
+    corrected = resize_grid(corrected, baseline.shape, 'bilinear')
+    return ((1-weight)*baseline + weight*corrected).astype(np.float32)
