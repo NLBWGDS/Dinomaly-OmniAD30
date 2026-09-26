@@ -64,3 +64,47 @@ image plus offline normal fitting (typically 14 views per normal image). The
 manifest timing excludes source inference, export and fitting; it is not proof
 of meeting the competition latency limit. The complete routed pipeline still
 uses multiple checkpoints, even though this branch reuses the unified model.
+
+## Cached reliability-gated candidate
+
+The measured fixed-detail experiment raised mean Pixel F1 to 0.4337489939 and
+AUPRO to 0.7472751807, with Image F1 unchanged at 0.9071216954. Ceramic Pixel F1
+was 0.0898267656, spindle Pixel F1 was 0.1717593788. Spindle precision rose but
+recall at its best-F1 operating point fell. These observations do not prove which
+individual pixels caused the change; the next experiment tests a fusion hypothesis.
+
+`reblend_omniad_detail.py` reuses the fixed-detail export without model inference.
+It computes a grid from normal training statistics:
+`reliability = clip(reference_span / max(local_span, reference_span), 0.25, 1)`.
+Here span is q95 minus median. More variable normal locations receive less weight.
+The fixed-detail correction is `detail_export - original_baseline`; positive
+corrections are multiplied by reliability, negative ones by reliability * 0.5.
+Thus each new pixel lies between its original-baseline and fixed-detail scores.
+No branch reconstruction, binary masks, new test-fitted statistics, or labels
+are needed. This proxy is NOT a calibrated confidence probability.
+
+This may reduce normal-texture boosts and retain coarse evidence lost during
+detail blending. It can also restore baseline false positives or weaken real
+defects in variable normal regions; a gain is not guaranteed. Image F1 remains
+unchanged intentionally. This ablation does not improve the underlying model.
+
+```bash
+python reblend_omniad_detail.py \
+  --baseline ./predictions/all30_calibrated_coverage \
+  --detail_predictions ./predictions/all30_detail_candidate \
+  --output_dir ./predictions/all30_detail_gated
+
+python evaluate_omniad_export.py \
+  --predictions ./predictions/all30_detail_gated \
+  --output ./diagnostics/all30_detail_gated.json
+```
+
+Run from the same project directory as the original export: older manifests
+record relative source paths. `--baseline` MUST be the original source recorded
+in the fixed-detail manifest, not the already blended candidate. Keep both source
+directories intact. The script validates source provenance, all30 image inventory,
+normal calibration statistics and image-score agreement. It does not hash cached
+maps, so do not modify the source exports in place. It rejects existing output
+directories. The unchanged 28 categories reference the fixed-detail candidate.
+Compare against the fixed-detail report above, not only the older coarse result.
+Do not sweep these parameters repeatedly against the same labeled development set.
