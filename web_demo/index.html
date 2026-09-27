@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Omni-AD 异常检测控制台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">OMNI-AD 30 · UNSUPERVISED INSPECTION</p>
+      <h1>工业异常检测控制台</h1>
+    </div>
+    <div class="status"><span></span>推理结果已载入</div>
+  </header>
+
+  <main class="workspace">
+    <aside class="sidebar">
+      <div class="side-title">
+        <span>产品类别</span>
+        <strong id="categoryCount">--</strong>
+      </div>
+      <label class="search">
+        <span>筛选</span>
+        <input id="categorySearch" type="search" placeholder="输入类别名称">
+      </label>
+      <div id="categoryList" class="category-list" aria-label="产品类别列表"></div>
+    </aside>
+
+    <section class="content">
+      <div class="summary-band">
+        <div class="summary-copy">
+          <p id="scheme">预测结果</p>
+          <h2 id="categoryTitle">正在载入</h2>
+          <span id="sampleMeta">请稍候</span>
+        </div>
+        <div class="metrics" aria-label="核心指标">
+          <article><span>Pixel F1</span><strong id="pixelF1">--</strong><i></i></article>
+          <article><span>Image F1</span><strong id="imageF1">--</strong><i></i></article>
+          <article><span>Pixel AUPRO</span><strong id="pixelAupro">--</strong><i></i></article>
+        </div>
+      </div>
+
+      <div class="viewer-toolbar">
+        <div class="segmented" role="tablist" aria-label="图像显示模式">
+          <button data-view="original">原图</button>
+          <button data-view="mask">标注</button>
+          <button data-view="heatmap">热力图</button>
+          <button class="active" data-view="overlay">叠加</button>
+        </div>
+        <div class="sample-score">
+          <span>图像异常分数</span>
+          <strong id="imageScore">--</strong>
+          <b id="sampleLabel">--</b>
+        </div>
+      </div>
+
+      <div class="viewer" id="viewer">
+        <div class="image-stage">
+          <img id="resultImage" alt="异常检测结果">
+          <div id="loading" class="loading">正在生成视图...</div>
+        </div>
+        <div class="heat-legend" aria-label="异常分数颜色图例">
+          <span>低响应</span><i></i><span>高响应</span>
+        </div>
+      </div>
+
+      <footer class="sample-nav">
+        <button id="previous" title="上一个样本" aria-label="上一个样本">‹</button>
+        <div class="sample-position">
+          <strong id="sampleName">--</strong>
+          <span><b id="sampleIndex">0</b> / <b id="sampleTotal">0</b></span>
+        </div>
+        <input id="sampleRange" type="range" min="0" max="0" value="0" aria-label="样本序号">
+        <button id="next" title="下一个样本" aria-label="下一个样本">›</button>
+      </footer>
+    </section>
+  </main>
+
+  <div id="errorToast" class="toast" role="alert"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

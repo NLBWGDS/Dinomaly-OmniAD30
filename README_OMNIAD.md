@@ -74,6 +74,32 @@ python dinomaly_omniad_uni.py --mode train \
 - Prediction score file: `predictions/omniad_dinomaly_uni/scores.csv`
 - Prediction heatmaps: one `.npy` file per test image, resized back to the input image size.
 
+## Recording dashboard
+
+Start the browser dashboard from the repository root after exporting predictions
+and evaluation metrics:
+
+```bash
+python demo_web.py \
+  --predictions ./diagnostics/all30_current/current_predictions \
+  --metrics ./diagnostics/all30_current/current_all30.json \
+  --data_path ../dataset/download/Omni-AD-30-release \
+  --host 0.0.0.0 \
+  --port 7860
+```
+
+Open `http://127.0.0.1:7860` on the server desktop. For a remote server, prefer
+an SSH tunnel instead of exposing the port publicly:
+
+```bash
+ssh -L 7860:127.0.0.1:7860 ubuntu@SERVER_IP
+```
+
+Then run the dashboard with its default `--host 127.0.0.1` and open the same URL
+on the local computer. The dashboard is read-only and does not train, evaluate,
+or modify prediction exports. Arrow keys change samples; number keys `1` to `4`
+switch between original image, ground truth, heatmap and overlay.
+
 ## Small-defect Defaults
 
 - Inputs are letterboxed to `560x560`, preserving aspect ratio and all edge content.
