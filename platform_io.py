@@ -98,7 +98,7 @@ def platform_input_path(raw, root, name, must_exist=True):
     return contained_path(portable, root, name, must_exist)
 
 
-def discover_images(path):
+def discover_images(path, require_unique_names=True):
     path = Path(path)
     if path.is_file():
         images = [path] if path.suffix.lower() in IMAGE_SUFFIXES else []
@@ -108,7 +108,7 @@ def discover_images(path):
         raise ValueError(f'No supported images found under {path}')
     names = [image.name for image in images]
     stems = [image.stem for image in images]
-    if len(names) != len(set(names)) or len(stems) != len(set(stems)):
+    if require_unique_names and (len(names) != len(set(names)) or len(stems) != len(set(stems))):
         raise ValueError('Platform output is flat; image names and stems must be unique')
     return images
 

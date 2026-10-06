@@ -15,16 +15,50 @@ not require outbound network access.
 Build and save the image on x86-64 Linux:
 
 ```bash
-docker build --pull -t omniad_dinomaly:1.0.0 .
-docker image inspect omniad_dinomaly:1.0.0
-docker save -o omniad_dinomaly_1.0.0.tar omniad_dinomaly:1.0.0
-zip -1 omniad_dinomaly_1.0.0.zip omniad_dinomaly_1.0.0.tar
-unzip -t omniad_dinomaly_1.0.0.zip
+docker build --pull -t omniad_dinomaly:1.0.2 .
+docker image inspect omniad_dinomaly:1.0.2
+docker save -o omniad_dinomaly_1.0.2.tar omniad_dinomaly:1.0.2
+zip -1 omniad_dinomaly_1.0.2.zip omniad_dinomaly_1.0.2.tar
+unzip -t omniad_dinomaly_1.0.2.zip
 ```
 
 The platform upload limit is 5 GB. Check the final ZIP before upload. Dataset files,
-development predictions, diagnostics and local checkpoints are excluded by
-`.dockerignore`.
+development predictions, diagnostics, local checkpoints and exported TAR/ZIP
+archives are excluded by `.dockerignore`. Do not include previous image archives
+in a new image build. Compare SHA256 checksums after downloading the archive.
+
+## Repackage the tested 1.0.1 environment
+
+On the server that still has `omniad_dinomaly:1.0.1`, the update Dockerfile reuses
+that image's exact dependencies and offline backbone. It copies only the adapter
+fixes and entry scripts, without downloading new packages or changing the model.
+Run the full release test and packaging pipeline from this project directory:
+
+```bash
+bash package_platform_release.sh \
+  ../dataset/download/Omni-AD-30-release/work_piece14 \
+  "$HOME/omniad_release_1.0.2"
+```
+
+The release directory must not already exist. This runs 100 epochs at batch size
+4 with requested resolution 512 (effective 518), then infers on every image under
+that product's `test` directory. Both jobs run with networking disabled. Training
+uses the PDF's `cd ./root && python train.py` command. The package is exported only
+after checking completion, all prediction maps, all visualization JSON files and
+the reasoning log. It also writes `verification.json`, `SHA256SUMS`, and the ZIP
+integrity check. These are execution/format checks, not an accuracy benchmark.
+
+The archive includes both tags for the same image:
+
+```text
+omniad_dinomaly:1.0.2
+zhejiang_ai_competition:hikrobot_comp_40_v2
+```
+
+Use the latter as the platform image version when registering this account's
+release. For a different account, set `PLATFORM_IMAGE` to the exact required tag
+before running the script. This setting changes the image tag, not the archive's
+filename. Source code updates alone do not update an already uploaded image.
 
 ## Training protocol
 
@@ -39,11 +73,18 @@ Expected input:
 ```
 
 Supported training parameters are shown in `platform_examples/train_param.json`.
+The parameter file is required; missing input fails with a diagnostic log instead
+of starting a default training job. Resolutions are rounded up to a multiple of
+14 for DINOv2 (512 becomes 518, while 560 and 784 stay unchanged). The effective
+resolution is recorded in `training_config.json` and the checkpoint, and reused
+by inference. Names may repeat in training subdirectories; staging renames them.
 Only OK/normal images in `images/train` are used. The fixed outputs are:
 
 ```text
 /output/output.bin
 /output/state.txt
+/output/train_debug.log
+/output/training_config.json
 ```
 
 `state.txt` is UTF-8. A progress line follows the platform parser format exactly:
@@ -53,6 +94,10 @@ Epoch(train) [14][7/7] Iter: 98/140 lr:0.000094  eta:0:00:08  time:0.131060  mem
 ```
 
 The word `finish` is written only after `output.bin` has been exported successfully.
+Progress starts at the first completed iteration. Full child-process output and
+tracebacks are persisted in `train_debug.log`, separate from the parser's state
+log. A GPU request without working CUDA fails explicitly rather than silently
+falling back to a slow CPU training run.
 
 Use this platform command template:
 
@@ -70,6 +115,14 @@ docker run \
   --rm ${imageVersion} \
   -c "cd /opt/omniad && sh train.sh /input/ /output/"
 ```
+
+The image also supplies `/opt/omniad/root/train.py` and `/root/train.py` for
+the PDF sample command `cd ./root && python train.py` (with the image's working
+directory `/opt/omniad`) or `cd /root && python train.py`. The explicit
+`/opt/omniad` command above is preferred. This compatibility entry was absent in
+1.0.1. Training and inference require different commands in the platform backend;
+the image's default CMD runs inference, not training. Uploading an image does not
+automatically register the correct training command or select that training library.
 
 ## Inference protocol
 
@@ -158,7 +211,7 @@ docker run --rm --gpus '"device=0"' --security-opt seccomp=unconfined \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
   -v /dev/shm:/dev/shm \
   -v "$PWD/train-input:/input" -v "$PWD/train-output:/output" \
-  --entrypoint /bin/bash omniad_dinomaly:1.0.0 \
+  --entrypoint /bin/bash omniad_dinomaly:1.0.2 \
   -c 'cd /opt/omniad && sh train.sh /input/ /output/'
 test -s train-output/output.bin
 tail -n 1 train-output/state.txt | grep '^finish'
@@ -170,14 +223,37 @@ Run inference:
 docker run --rm --runtime=nvidia --cap-add=ALL \
   -e NVIDIA_VISIBLE_DEVICES=0 -v /tmp/:/tmp/ \
   -v "$PWD/infer-input:/input" -v "$PWD/infer-output:/output" \
-  omniad_dinomaly:1.0.0 /bin/bash \
+  omniad_dinomaly:1.0.2 /bin/bash \
   -c 'cd /opt/omniad && sh start.sh /input/ /output/'
 test -s infer-input/pred/pred.json
 test -s infer-input/pred/pred_maps/test/000.npy
 tail -n 1 infer-output/reasoning.log | grep 'reasoning close success'
 ```
 
-The package adapter is protocol-complete, but the image size, RTX 4090 runtime,
-peak VRAM, and per-image latency must still be verified by building and running the
-image on a Linux NVIDIA host. Encrypted model files are not supported; leave the
-optional `modelPassword` field empty.
+## Diagnosing platform training failures
+
+The UI status "training algorithm execution failed" is not a Python traceback.
+Obtain the selected training-library version, the platform's expanded Docker
+command (with private host paths redacted), container exit code/stdout/stderr,
+the supplied `param.json`, and the files in `/output` from the task details or
+platform administrator.
+
+- No `state.txt`: check the selected training library, image tag, entry command,
+  mount paths and permissions, GPU runtime and container startup stderr.
+- Only `Start Training` or an error marker: inspect `train_debug.log`. Version
+  1.0.1 does not preserve that log; its Python traceback must be read from the
+  platform's captured container stdout/stderr.
+- Loss is recorded before failure: inspect the traceback for CUDA OOM, bad
+  images, dataloader errors or disk errors. Do not infer the cause from duration.
+- `output.bin` and terminal `finish` exist: check platform output collection,
+  the output mount, and log-parser configuration.
+
+A two-step smoke test validates the exercised path only, not all parameters,
+all datasets, or the platform's actual backend configuration. Build and run the
+new image on the Linux NVIDIA host, then test through the platform. Check archive
+size, GPU latency, peak VRAM and full training separately. Encrypted model files
+are not supported; leave the optional `modelPassword` field empty.
+
+Version 1.0.2 fixes training integration and diagnostics. It still uses the basic
+Dinomaly inference path; it does not include development-time memory banks or
+category-specific routing.

@@ -88,6 +88,11 @@ python demo_web.py \
   --port 7860
 ```
 
+The browser preview uses a maximum side length of 1280 pixels while evaluation
+maps remain untouched at original resolution. On a slow remote connection, add
+`--display_max_side 960` to reduce transfer size further. Recently opened samples
+and rendered views are cached in memory for fast switching.
+
 Open `http://127.0.0.1:7860` on the server desktop. For a remote server, prefer
 an SSH tunnel instead of exposing the port publicly:
 

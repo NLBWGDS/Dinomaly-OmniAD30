@@ -1,0 +1,14 @@
+# Reuse the exact dependencies and offline backbone from the tested 1.0.1 image.
+ARG BASE_IMAGE=omniad_dinomaly:1.0.1
+FROM ${BASE_IMAGE}
+
+WORKDIR /opt/omniad
+COPY platform_train.py platform_io.py platform_infer.py platform_entrypoint.sh start.sh train.sh ./
+COPY root/train.py ./root/train.py
+RUN ln -s /opt/omniad/root/train.py /root/train.py && \
+    chmod +x platform_entrypoint.sh start.sh train.sh && \
+    python root/train.py --help && \
+    python /root/train.py --help
+
+LABEL org.opencontainers.image.version="1.0.2"
+CMD ["/bin/bash", "-c", "cd /opt/omniad && sh start.sh /input/ /output/"]

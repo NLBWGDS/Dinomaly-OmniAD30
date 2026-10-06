@@ -50,8 +50,19 @@ class DashboardDataTests(unittest.TestCase):
     def test_all_views_are_png(self):
         dashboard = DashboardData(self.predictions, self.data, self.metrics)
         for view in ("original", "mask", "heatmap", "overlay"):
-            payload = dashboard.render("sample_part", 0, view)
-            self.assertTrue(payload.startswith(b"\x89PNG\r\n\x1a\n"), view)
+            payload, content_type = dashboard.render("sample_part", 0, view)
+            expected = b"\x89PNG\r\n\x1a\n" if view == "mask" else b"\xff\xd8\xff"
+            self.assertTrue(payload.startswith(expected), view)
+            self.assertEqual(content_type, "image/png" if view == "mask" else "image/jpeg")
+
+    def test_preview_is_downscaled_without_changing_export(self):
+        dashboard = DashboardData(self.predictions, self.data, self.metrics, display_max_side=12)
+        rgb, scores, truth = dashboard.sample_arrays("sample_part", 0)
+        self.assertEqual(rgb.shape[:2], (8, 12))
+        self.assertEqual(scores.shape, (8, 12))
+        self.assertEqual(truth.shape, (8, 12))
+        original = np.load(self.predictions / "sample_part" / "good" / "000.png.npy")
+        self.assertEqual(original.shape, (16, 24))
 
 
 if __name__ == "__main__":

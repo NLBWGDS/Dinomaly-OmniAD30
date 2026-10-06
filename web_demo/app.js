@@ -1,4 +1,4 @@
-const state = { config: null, category: null, samples: [], index: 0, view: "overlay" };
+const state = { config: null, category: null, samples: [], index: 0, view: "overlay", renderToken: 0 };
 const $ = (id) => document.getElementById(id);
 
 async function getJSON(url) {
@@ -63,9 +63,22 @@ function renderSample() {
   $("sampleLabel").classList.toggle("good", !sample.is_anomaly);
   const image = $("resultImage");
   const loading = $("loading");
+  const token = ++state.renderToken;
   loading.classList.remove("hidden");
-  image.onload = () => loading.classList.add("hidden");
-  image.onerror = () => { loading.classList.add("hidden"); showError(new Error("图像生成失败")); };
+  image.onload = () => {
+    if (token !== state.renderToken) return;
+    loading.classList.add("hidden");
+    if (state.samples.length > 1) {
+      const nextIndex = (state.index + 1) % state.samples.length;
+      const preload = new Image();
+      preload.src = `/api/render?category=${encodeURIComponent(state.category)}&index=${nextIndex}&view=${state.view}`;
+    }
+  };
+  image.onerror = () => {
+    if (token !== state.renderToken) return;
+    loading.classList.add("hidden");
+    showError(new Error("图像生成失败"));
+  };
   image.src = `/api/render?category=${encodeURIComponent(state.category)}&index=${state.index}&view=${state.view}`;
 }
 

@@ -1,4 +1,7 @@
+import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +12,7 @@ import numpy as np
 from PIL import Image
 
 from platform_infer import run as run_inference, visual_objects
-from platform_io import contained_path, get_parameter, platform_input_path
+from platform_io import contained_path, discover_images, get_parameter, platform_input_path
 from platform_train import learning_rate, run as run_training, stage_training_data
 
 
@@ -109,15 +112,24 @@ class PlatformAdapterTests(unittest.TestCase):
             for index in range(2):
                 Image.fromarray(np.zeros((8, 8, 3), np.uint8)).save(images / f'{index}.png')
             (data / 'param.json').write_text(json.dumps({'total_iters': 2, 'batch_size': 1,
-                                                         'num_workers': 0, 'resolution': 560}), encoding='utf-8')
+                                                         'num_workers': 0, 'resolution': 512}), encoding='utf-8')
+            runtime.mkdir()
+            sentinel = runtime / 'other_job.txt'
+            sentinel.write_text('keep', encoding='utf-8')
 
             class FakeProcess:
-                stdout = iter(['iter [1/2], loss:0.5000\n', 'iter [2/2], loss:0.2500\n'])
+                stdout = io.StringIO('iter [1/2], loss:0.5000\niter [2/2], loss:0.2500\n')
 
                 def wait(self):
                     return 0
 
+                def poll(self):
+                    return 0
+
             def start(command, **kwargs):
+                self.assertEqual(command[command.index('--crop_size') + 1], '518')
+                self.assertEqual(command[command.index('--image_size') + 1], '518')
+                self.assertEqual(command[command.index('--log_every') + 1], '1')
                 destination = Path(command[command.index('--output_dir') + 1])
                 destination.mkdir(parents=True)
                 (destination / 'omniad_dinomaly_uni.pth').write_bytes(b'checkpoint')
@@ -136,6 +148,81 @@ class PlatformAdapterTests(unittest.TestCase):
             self.assertIn('memory:321', state)
             self.assertNotIn('finish', '\n'.join(state.splitlines()[:-1]))
             self.assertTrue(state.rstrip().endswith('finish omniad training'))
+            config = json.loads((output_root / 'training_config.json').read_text(encoding='utf-8'))
+            self.assertEqual(config['requested_resolution'], 512)
+            self.assertEqual(config['effective_resolution'], 518)
+            self.assertEqual(sentinel.read_text(encoding='utf-8'), 'keep')
+
+    def test_training_failure_keeps_child_traceback_without_success_marker(self):
+        for exit_code in (1, 0):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                data = root / 'input/original/input_data'
+                images = data / 'images/train'
+                images.mkdir(parents=True)
+                Image.new('RGB', (8, 8)).save(images / 'image.png')
+                (data / 'param.json').write_text('{"total_iters": 2}', encoding='utf-8')
+                child_error = ('Traceback (most recent call last):\n'
+                               'RuntimeError: worker finished unexpectedly\n')
+                fake = SimpleNamespace(stdout=io.StringIO(child_error),
+                                       wait=lambda: exit_code, poll=lambda: exit_code)
+                args = SimpleNamespace(input_dir=str(root / 'input'), output_dir=str(root / 'output'),
+                                       runtime_dir=str(root / 'runtime'), device='cpu')
+                with patch('platform_train.subprocess.Popen', return_value=fake):
+                    with self.assertRaises((RuntimeError, FileNotFoundError)):
+                        run_training(args)
+                state = (root / 'output/state.txt').read_text(encoding='utf-8')
+                debug = (root / 'output/train_debug.log').read_text(encoding='utf-8')
+                self.assertNotIn('finish', state)
+                self.assertIn('train_debug.log', state)
+                self.assertIn(child_error, debug)
+                self.assertFalse((root / 'output/output.bin').exists())
+
+    def test_training_names_need_not_be_unique_but_inference_names_must_be(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for folder in ('a', 'b'):
+                (root / folder).mkdir()
+                Image.new('RGB', (8, 8)).save(root / folder / 'same.png')
+            images = discover_images(root, require_unique_names=False)
+            staged, category = stage_training_data(images, root / 'runtime')
+            self.assertEqual(len(list((staged / category / 'train/good').iterdir())), 2)
+            with self.assertRaisesRegex(ValueError, 'must be unique'):
+                discover_images(root)
+
+    def test_documented_training_entry_writes_error_log_with_missing_parameters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = Path(__file__).resolve().parent / 'root/train.py'
+            result = subprocess.run(
+                [sys.executable, 'train.py', '--input_dir', str(root / 'input'),
+                 '--output_dir', str(root / 'output'), '--device', 'cpu'],
+                cwd=entry.parent, capture_output=True, text=True, encoding='utf-8', timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('ModuleNotFoundError', result.stderr)
+            debug = (root / 'output/train_debug.log').read_text(encoding='utf-8')
+            self.assertIn('FileNotFoundError', debug)
+            self.assertIn('param.json', debug)
+            self.assertNotIn('finish', (root / 'output/state.txt').read_text(encoding='utf-8'))
+
+    def test_gpu_unavailable_fails_before_starting_cpu_training(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / 'input/original/input_data'
+            (data / 'images/train').mkdir(parents=True)
+            Image.new('RGB', (8, 8)).save(data / 'images/train/image.png')
+            (data / 'param.json').write_text('{"total_iters": 2}', encoding='utf-8')
+            fake_torch = SimpleNamespace(__version__='test', version=SimpleNamespace(cuda='11.8'),
+                                         cuda=SimpleNamespace(is_available=lambda: False))
+            args = SimpleNamespace(input_dir=str(root / 'input'), output_dir=str(root / 'output'),
+                                   runtime_dir=str(root / 'runtime'), device='cuda:0')
+            with patch.dict('sys.modules', {'torch': fake_torch}), \
+                    patch('platform_train.subprocess.Popen') as start:
+                with self.assertRaisesRegex(RuntimeError, 'CUDA requested but unavailable'):
+                    run_training(args)
+                start.assert_not_called()
+            debug = (root / 'output/train_debug.log').read_text(encoding='utf-8')
+            self.assertIn('CUDA requested but unavailable', debug)
 
     def test_visual_empty_below_image_threshold(self):
         self.assertEqual(visual_objects(.09, np.ones((5, 5), np.float32), .1, .2, 0), [])

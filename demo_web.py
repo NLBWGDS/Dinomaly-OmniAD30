@@ -42,7 +42,7 @@ def colorize(values):
 
 
 class DashboardData:
-    def __init__(self, predictions, data_path, metrics_path):
+    def __init__(self, predictions, data_path, metrics_path, display_max_side=1280):
         self.predictions = Path(predictions).resolve()
         self.data_path = Path(data_path).resolve()
         self.metrics_path = Path(metrics_path).resolve() if metrics_path else None
@@ -51,6 +51,7 @@ class DashboardData:
         self.mean = {}
         self.scheme = "prediction export"
         self.sources = {}
+        self.display_max_side = display_max_side
         self._lock = threading.Lock()
         self._load()
 
@@ -114,12 +115,26 @@ class DashboardData:
             raise KeyError(f"Unknown sample: {category}/{index}")
         return locate(records[index], self.predictions, self.data_path)
 
-    @lru_cache(maxsize=160)
-    def render(self, category, index, view):
+    @lru_cache(maxsize=6)
+    def sample_arrays(self, category, index):
         paths = self._paths(category, index)
         scores, truth = read_pair(paths)
         with Image.open(paths[0]) as handle:
-            rgb = np.asarray(handle.convert("RGB")).copy()
+            image = handle.convert("RGB")
+            scale = min(1.0, self.display_max_side / max(image.size))
+            size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+            if size != image.size:
+                image = image.resize(size, Image.Resampling.LANCZOS)
+                score_image = Image.fromarray(scores.astype(np.float32), mode="F")
+                scores = np.asarray(score_image.resize(size, Image.Resampling.BILINEAR)).copy()
+                mask_image = Image.fromarray((truth * 255).astype(np.uint8), mode="L")
+                truth = np.asarray(mask_image.resize(size, Image.Resampling.NEAREST)) > 0
+            rgb = np.asarray(image).copy()
+        return rgb, scores, truth
+
+    @lru_cache(maxsize=48)
+    def render(self, category, index, view):
+        rgb, scores, truth = self.sample_arrays(category, index)
         finite = scores[np.isfinite(scores)]
         low, high = np.percentile(finite, [1.0, 99.5]) if finite.size else (0.0, 1.0)
         normalized = np.clip((scores - low) / max(float(high - low), 1e-8), 0.0, 1.0)
@@ -138,8 +153,13 @@ class DashboardData:
             raise KeyError(view)
         image = Image.fromarray(output)
         buffer = io.BytesIO()
-        image.save(buffer, format="PNG", optimize=True)
-        return buffer.getvalue()
+        if view == "mask":
+            image.save(buffer, format="PNG", optimize=False)
+            content_type = "image/png"
+        else:
+            image.save(buffer, format="JPEG", quality=88, subsampling=1, optimize=False)
+            content_type = "image/jpeg"
+        return buffer.getvalue(), content_type
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -179,8 +199,8 @@ class Handler(BaseHTTPRequestHandler):
                 category = query.get("category", [""])[0]
                 index = int(query.get("index", ["0"])[0])
                 view = query.get("view", ["overlay"])[0]
-                self.send_bytes(self.server.dashboard.render(category, index, view), "image/png",
-                                cache="public, max-age=3600")
+                payload, content_type = self.server.dashboard.render(category, index, view)
+                self.send_bytes(payload, content_type, cache="public, max-age=3600")
                 return
             self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except (KeyError, ValueError) as error:
@@ -197,8 +217,12 @@ def main():
     parser.add_argument("--metrics", default="./diagnostics/all30_current/current_all30.json")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument("--display_max_side", type=int, default=1280,
+                        help="Maximum width or height used by browser previews")
     args = parser.parse_args()
-    dashboard = DashboardData(args.predictions, args.data_path, args.metrics)
+    if args.display_max_side < 320:
+        parser.error("--display_max_side must be at least 320")
+    dashboard = DashboardData(args.predictions, args.data_path, args.metrics, args.display_max_side)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.dashboard = dashboard
     print(f"Omni-AD dashboard: http://{args.host}:{args.port}")
