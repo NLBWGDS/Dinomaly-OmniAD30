@@ -14,23 +14,10 @@ import traceback
 from pathlib import Path
 
 from platform_io import atomic_json, bounded_number, discover_images, get_parameter, load_json, parse_bool
+from platform_bootstrap import ProtocolLog as StateLog
 
 
 ITERATION = re.compile(r'iter \[(\d+)/(\d+)\], loss:([0-9.eE+-]+)')
-
-
-class StateLog:
-    def __init__(self, path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = self.path.open('w', encoding='utf-8', buffering=1)
-
-    def write(self, message):
-        print(message, flush=True)
-        self.handle.write(message + '\n')
-
-    def close(self):
-        self.handle.close()
 
 
 def stage_training_data(images, root, category='platform_category'):
@@ -194,7 +181,7 @@ def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument('--input_dir', default='/input')
     parser.add_argument('--output_dir', default='/output')
     parser.add_argument('--runtime_dir', default='/tmp/omniad_platform_train')

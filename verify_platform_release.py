@@ -51,6 +51,7 @@ def prepare(dataset, work):
 def check_training(work):
     expected = read_json(work / 'expected.json')
     output = work / 'train-output'
+    assert 'omniad bootstrap exit code=0' in (output / 'bootstrap.log').read_text(encoding='utf-8')
     lines = (output / 'state.txt').read_text(encoding='utf-8').splitlines()
     assert lines[-1] == 'finish omniad training'
     assert not any('finish' in line for line in lines[:-1])
@@ -72,6 +73,8 @@ def check_inference(work):
     from PIL import Image
 
     expected = read_json(work / 'expected.json')
+    assert 'omniad bootstrap exit code=0' in (work / 'infer-output/bootstrap.log').read_text(encoding='utf-8')
+    assert 'omniad shell start mode=infer' in (work / 'infer-output/entrypoint.log').read_text(encoding='utf-8')
     pred_root = work / 'infer-input/pred'
     predictions = read_json(pred_root / 'pred.json')
     images = sorted((work / 'infer-input/imgs').iterdir())
@@ -94,6 +97,7 @@ def check_inference(work):
             assert obj['type'] == 'polygon'
     lines = (work / 'infer-output/reasoning.log').read_text(encoding='utf-8').splitlines()
     assert lines[0] == 'reasoning start' and lines[-1] == 'reasoning close success'
+    assert lines.count('reasoning start') == 1 and not any('reasoning error,' in line for line in lines)
     assert sum(line.startswith('reasoning imageName=') for line in lines) == len(images)
     write_json(work / 'verification.json', dict(status='passed', train_images=expected['train_images'],
                training_iterations=expected['iterations'], test_images=len(images),

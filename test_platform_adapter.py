@@ -227,6 +227,25 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_visual_empty_below_image_threshold(self):
         self.assertEqual(visual_objects(.09, np.ones((5, 5), np.float32), .1, .2, 0), [])
 
+    def test_nonfinite_image_scores_cannot_produce_successful_predictions(self):
+        for score in (float('nan'), float('inf')):
+            with self.subTest(score=score), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                images = root / 'input/imgs'
+                images.mkdir(parents=True)
+                Image.new('RGB', (8, 8)).save(images / 'image.png')
+                (root / 'input/output.bin').write_bytes(b'model')
+                (root / 'input/param.json').write_text(json.dumps(dict(
+                    algorithmType=103, modelType=1, modelPath='/output.bin',
+                    imagePath='/imgs', platType=1)), encoding='utf-8')
+                factory = lambda *args: lambda path: (score, np.zeros((8, 8), np.float32), 1.)
+                with self.assertRaisesRegex(ValueError, 'invalid anomaly score'):
+                    run_inference(SimpleNamespace(input_dir=root / 'input', output_dir=root / 'output'), factory)
+                self.assertFalse((root / 'input/pred/pred.json').exists())
+                log = (root / 'output/reasoning.log').read_text(encoding='utf-8')
+                self.assertIn('reasoning error', log)
+                self.assertNotIn('reasoning close success', log)
+
     def test_visual_schema_matches_unsupervised_polygon(self):
         contour = np.array([[[1, 2]], [[8, 2]], [[8, 9]], [[1, 9]]], np.int32)
         fake_cv2 = SimpleNamespace(

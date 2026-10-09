@@ -11,20 +11,7 @@ import numpy as np
 
 from platform_io import (atomic_json, bounded_number, discover_images,
                          get_parameter, load_json, platform_input_path)
-
-
-class ReasoningLog:
-    def __init__(self, path):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = path.open('w', encoding='utf-8', buffering=1)
-
-    def write(self, message):
-        print(message, flush=True)
-        self.handle.write(message + '\n')
-
-    def close(self):
-        self.handle.close()
+from platform_bootstrap import ProtocolLog as ReasoningLog
 
 
 class DinomalyPredictor:
@@ -148,6 +135,8 @@ def run(args, predictor_factory=DinomalyPredictor):
                 expected_shape = (source.height, source.width)
             if anomaly_map.shape != expected_shape or not np.isfinite(anomaly_map).all():
                 raise ValueError(f'invalid anomaly map for {image.name}: {anomaly_map.shape}')
+            if not np.isfinite(score):
+                raise ValueError(f'invalid anomaly score for {image.name}: {score}')
             normalized = np.clip(anomaly_map, 0., 1.).astype(np.float32)
             bounded_score = float(np.clip(score, 0., 1.))
             relative_map = f'pred_maps/test/{image.stem}.npy'
@@ -175,7 +164,7 @@ def run(args, predictor_factory=DinomalyPredictor):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument('--input_dir', default='/input')
     parser.add_argument('--output_dir', default='/output')
     run(parser.parse_args())

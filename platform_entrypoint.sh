@@ -8,10 +8,10 @@ fi
 
 case "$mode" in
   train)
-    exec python -u /opt/omniad/platform_train.py "$@"
+    exec /bin/bash /opt/omniad/platform_launch.sh train "$@"
     ;;
   infer|inference|predict)
-    exec python -u /opt/omniad/platform_infer.py "$@"
+    exec /bin/bash /opt/omniad/platform_launch.sh infer "$@"
     ;;
   *)
     echo "usage: platform_entrypoint.sh {train|infer} [arguments...]" >&2
